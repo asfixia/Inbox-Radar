@@ -1,0 +1,52 @@
+{
+  "name": "Inbox Radar – Productivity Assistant - Tab Notifier for Gmail, WhatsApp, Slack & More.",
+  "short_name": "Inbox Radar",
+  "version": "1.0.0",
+  "manifest_version": 3,
+  "description": "Boost your productivity by getting notified about tab updates like new messages in Gmail, WhatsApp Web, Slack, and more—without switching tabs.",
+  "author": "Centro de Inteligência Territorial",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": "icons/icon128.png",
+    "default_popup": "popup.html",
+    "default_title": "Tab Title Notifier"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "tabs",
+    "storage",
+    "notifications"
+  ],
+  "host_permissions": [
+    "*://*/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  },
+  "options_page": "options.html",
+  "homepage_url": "https://github.com/seu-usuario/tab-title-notifier",
+  "offline_enabled": true,
+  "keywords": [
+    "productivity",
+    "notification",
+    "tab watcher",
+    "tab alert",
+    "gmail",
+    "whatsapp",
+    "slack",
+    "outlook",
+    "chrome extension",
+    "focus",
+    "workflow"
+  ],
+  "categories": ["Productivity"],
+  "default_locale": "en"
+}

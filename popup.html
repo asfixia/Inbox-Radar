@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Tab Watcher</title>
+  <style>
+    body { font-family: sans-serif; width: 320px; padding: 10px; }
+    label { display: block; margin-bottom: 8px; }
+    .regex-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .regex-row input, .regex-row select {
+      margin-right: 5px;
+      padding: 6px;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      box-sizing: border-box;
+      transition: all 0.2s ease-in-out;
+    }
+    .regex-row input { flex: 1; }
+    .regex-row select { width: 70px; }
+    .regex-row button {
+      background-color: #f0f0f0;
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      padding: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease-in-out;
+    }
+    .regex-row button.remove-btn {
+      background-color: white;
+    }
+    button.tab {
+      background: #f0f0f0;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: 6px 10px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: all 0.2s ease-in-out;
+    }
+    button.tab.active {
+      border-bottom: 2px solid #0078d7;
+      background: #e8e8e8;
+    }
+    button:not(.tab):hover {
+      background-color: #e0e0e0;
+    }
+    img.favicon {
+      border-radius: 50%;
+      transition: all 0.3s ease;
+    }
+    img.favicon:hover {
+      box-shadow: 0 0 5px rgba(0, 0, 0, 0.3);
+      transform: scale(1.1);
+    }
+    .section { display: none; margin-top: 15px; }
+    .section.active { display: block; }
+    ul { padding-left: 18px; }
+    li { margin-bottom: 5px; }
+    h3, h4 { margin-bottom: 6px; margin-top: 12px; }
+    .message { color: green; font-size: 12px; margin-top: 5px; display: none; }
+    .regex_suggestion {
+      padding: 5px 0 5px 15px;
+      background-color: #F0F0F0;
+      cursor: pointer;
+      min-width: 60%;
+      text-align: left;
+    }
+    .regex_suggestion:hover {
+      background-color: #e0e0e0;
+    }
+    .suggestion_icon {
+      width: 16px;
+      height: 16px;
+      vertical-align: text-bottom;
+    }
+    .regex-row input:disabled, .regex-row select:disabled {
+      color: black;
+      opacity: 1;
+      background-color: lightgray;
+    }
+  </style>
+</head>
+<body>
+  <div>
+    <button class="tab" id="show-unread">🔔 Notifications</button>
+    <button class="tab" id="show-filters">🎯 Filters</button>
+  </div>
+
+  <div id="unread-section" class="section active">
+    <div id="notification-area">
+      <h3 id="notifications-title" style="display:none;">Unread Notifications</h3>
+      <ul id="unread-list"></ul>
+      <div id="no-notifications" style="display:none;">No notifications yet.<br>Go to "🎯 Filters" to add some rules!</div>
+      <button id="clear-badge" style="display:none;">Clear Notifications</button>
+      <div id="clear-message" class="message">✔️ Notifications cleared!</div>
+    </div>
+
+    <div id="matched-area" style="margin-top:15px;">
+      <h4 id="matched-title" style="display:none;">Matched Tabs</h4>
+      <ul id="matched-list"></ul>
+      <div id="no-matched" style="display:none;">No tabs matched current filters. Try adding more filters!</div>
+    </div>
+  </div>
+
+  <div id="filters-section" class="section">
+    <h3>Regex Filters</h3>
+    <div id="regex-list"></div>
+    <button id="add-regex">+ Add Regex</button>
+    <button id="save-regex">Save Regex Rules</button>
+    <div id="save-message" class="message">✔️ Filters saved!</div>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
