@@ -18,6 +18,21 @@ chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.set({ regexFilters });
 });
 
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return; // Nenhuma janela com foco
+
+  const tabs = await chrome.tabs.query({ active: true, windowId });
+  const tab = tabs[0];
+  if (!tab) return;
+
+  const notifiedTabs = await getNotifiedTabs();
+  if (notifiedTabs[tab.id]) {
+    delete notifiedTabs[tab.id];
+    await chrome.storage.local.set({ notifiedTabs });
+    updateBadge(notifiedTabs);
+  }
+});
+
 
 // Utilities
 async function getRegexRules() {
