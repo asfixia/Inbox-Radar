@@ -1,65 +1,33 @@
-import { DEFAULT_SUGGESTIONS } from './suggestions.js';
+import {DEFAULT_BADGE_COLORS, DEFAULT_SUGGESTIONS} from './suggestions.js';
+import * as UTILS from "./utils.js";
+import { MESSAGE_NAMES, STORE_NAMES } from "./utils.js";
 
 // === background.js ===
 let lastTitles = {};
 let regexRules = [];
 
 chrome.runtime.onInstalled.addListener(async () => {
-  // Carrega regras existentes
-  const stored = await chrome.storage.local.get('regexFilters');
-  let regexFilters = stored.regexFilters || [];
-
-  // Adiciona apenas se ainda não estiverem presentes
-  DEFAULT_SUGGESTIONS.forEach(s => {
-    const exists = regexFilters.some(r => r.pattern === s.pattern && r.type === s.type);
-    if (!exists) regexFilters.push(s);
-  });
-
-  await chrome.storage.local.set({ regexFilters });
+  setUpdateTimeInterval();
+  await onReload();
+  onReload = () => {};
 });
 
-chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  if (windowId === chrome.windows.WINDOW_ID_NONE) return; // Nenhuma janela com foco
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === MESSAGE_NAMES.UPDATE_BADGE_NOW) {
+    updateBadge(); // or pass notifiedTabs if needed
+  }
+});
+
+chrome.windows.onFocusChanged.addListener(async function clearNotificationFromFocusedWindow(windowId){
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
 
   const tabs = await chrome.tabs.query({ active: true, windowId });
   const tab = tabs[0];
   if (!tab) return;
 
-  const notifiedTabs = await getNotifiedTabs();
-  if (notifiedTabs[tab.id]) {
-    delete notifiedTabs[tab.id];
-    await chrome.storage.local.set({ notifiedTabs });
-    updateBadge(notifiedTabs);
-  }
+  await clearNotification(tab.id);
 });
 
-
-// Utilities
-async function getRegexRules() {
-  const stored = await chrome.storage.local.get('regexFilters');
-  return (stored.regexFilters || []).map(r => ({
-    pattern: new RegExp(r.pattern, 'i'),
-    type: r.type
-  }));
-}
-
-async function getNotifiedTabs() {
-  const stored = await chrome.storage.local.get('notifiedTabs');
-  return stored.notifiedTabs || {};
-}
-
-async function updateBadge(notifiedTabs) {
-  const count = Object.keys(notifiedTabs).length;
-  chrome.action.setBadgeText({ text: count > 0 ? count.toString() : '' });
-  chrome.action.setBadgeBackgroundColor({ color: '#ff0000' });
-}
-
-// Load regex rules on install
-chrome.runtime.onInstalled.addListener(async () => {
-  regexRules = await getRegexRules();
-});
-
-// Update regex rules on change
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.regexFilters) {
     regexRules = changes.regexFilters.newValue.map(r => ({
@@ -69,7 +37,6 @@ chrome.storage.onChanged.addListener((changes) => {
   }
 });
 
-// Handle title changes
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!changeInfo.title && !tab.url) return;
 
@@ -77,90 +44,166 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   const lastTitle = lastTitles[tabId];
   lastTitles[tabId] = newTitle;
 
-  if (newTitle !== lastTitle) {
-    try {
-      const [tabInfo, windowInfo] = await Promise.all([
-        chrome.tabs.get(tabId),
-        chrome.windows.getLastFocused({ populate: false })
-      ]);
+  if (newTitle === lastTitle) return;
 
-      if (tabInfo.active && tabInfo.windowId === windowInfo.id && windowInfo.focused) {
-        return; // Ignore if tab is active in focused window
-      }
+  try {
+    const [tabInfo, windowInfo] = await Promise.all([
+      chrome.tabs.get(tabId),
+      chrome.windows.getLastFocused({ populate: false })
+    ]);
 
-      const matchesRegex = regexRules.some(rule => {
-        if (rule.type === 'url') {
-          return rule.pattern.test(tab.url);
-        } else if (rule.type === 'title') {
-          return rule.pattern.test(newTitle);
+    if (tabInfo.active && tabInfo.windowId === windowInfo.id && windowInfo.focused) return;
+
+    const matchesRegex = regexRules.some(rule => {
+      if (rule.type === 'url') return rule.pattern.test(tab.url);
+      if (rule.type === 'title') return rule.pattern.test(newTitle);
+      return false;
+    });
+
+    if (!matchesRegex) return;
+
+    const notifiedTabs = await getNotifiedTabs();
+    const isTabNotified = notifiedTabs[tabId] !== undefined;
+    notifiedTabs[tabId] = isTabNotified ? notifiedTabs[tabId] : Date.now();
+    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_TABS]: notifiedTabs });
+    updateBadge(notifiedTabs);
+
+    const mode = await getNotificationMode();
+    if (!isTabNotified && (mode === 'popup' || mode === 'both')) {
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+        title: 'New notification',
+        message: `${tab.title}`,
+        priority: 1
+      }, () => {
+        if (chrome.runtime.lastError) {
+          console.error('Error creating the notification:', chrome.runtime.lastError);
         }
-        return false;
       });
-
-      if (!matchesRegex) {
-        return; // Ignore if no regex matches
-      }
-
-      const notifiedTabs = await getNotifiedTabs();
-      notifiedTabs[tabId] = true;
-      await chrome.storage.local.set({ notifiedTabs });
-      updateBadge(notifiedTabs);
-
-    } catch (error) {
-      console.warn(`Tab ${tabId} or window not accessible while checking title.`, error);
     }
+  } catch (error) {
+    console.warn(`Error processing tab atualization ${tabId}:`, error);
   }
 });
 
-// Handle tab closed
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   delete lastTitles[tabId];
-  const notifiedTabs = await getNotifiedTabs();
-  if (notifiedTabs[tabId]) {
-    delete notifiedTabs[tabId];
-    await chrome.storage.local.set({ notifiedTabs });
-    updateBadge(notifiedTabs);
-  }
+
+  await clearNotification(tabId);
 });
 
-// Handle tab focused
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  const notifiedTabs = await getNotifiedTabs();
-
-  if (notifiedTabs[tabId]) {
-    try {
-      await chrome.tabs.get(tabId);
-      delete notifiedTabs[tabId];
-      await chrome.storage.local.set({ notifiedTabs });
-      updateBadge(notifiedTabs);
-    } catch (error) {
-      console.warn(`Tab ${tabId} no longer exists during activation.`, error);
-    }
-  }
+  await clearNotification(tabId);
 });
 
-// Handle clicking extension icon (show unread tabs)
 chrome.action.onClicked.addListener(async () => {
   const notifiedTabs = await getNotifiedTabs();
   const tabIds = Object.keys(notifiedTabs).map(id => parseInt(id, 10));
-
   if (tabIds.length === 0) return;
 
   const allTabs = await chrome.tabs.query({});
-  const messages = allTabs
-    .filter(tab => tabIds.includes(tab.id))
-    .map(tab => `• ${tab.title}`);
+  const messages = allTabs.filter(tab => tabIds.includes(tab.id)).map(tab => `• ${tab.title}`);
 
-  chrome.notifications.create({
-    type: 'list',
-    iconUrl: chrome.runtime.getURL('icons/icon128.png'),
-    title: 'Tabs with Unread Notifications',
-    message: 'You have unread notifications:',
-    items: messages.slice(0, 5).map(m => ({ title: m, message: '' })),
-    priority: 2
-  }, () => {
-    if (chrome.runtime.lastError) {
-      console.error('Notification error:', chrome.runtime.lastError);
-    }
-  });
+  const mode = await getNotificationMode();
+  if (mode === 'popup' || mode === 'both') {
+    chrome.notifications.create({
+      type: 'list',
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title: 'Tabs with Unread Notifications',
+      message: 'You have unread notifications:',
+      items: messages.slice(0, 5).map(m => ({ title: m, message: '' })),
+      priority: 2
+    }, () => {
+      if (chrome.runtime.lastError) {
+        console.error('Notification error:', chrome.runtime.lastError);
+      }
+    });
+  }
 });
+
+async function setDefaultColorSchema() {
+    const stored = await chrome.storage.local.get(STORE_NAMES.BADGE_COLOR_SCHEME);
+
+  if (stored[STORE_NAMES.BADGE_COLOR_SCHEME] === undefined) {
+    await chrome.storage.local.set({ [STORE_NAMES.BADGE_COLOR_SCHEME]: DEFAULT_BADGE_COLORS });
+  }
+}
+
+async function initRegexFilters() {
+  const loadExistingRules = await chrome.storage.local.get(STORE_NAMES.REGEX_FILTERS);
+  let regexFilters = loadExistingRules[STORE_NAMES.REGEX_FILTERS] || [];
+
+  DEFAULT_SUGGESTIONS.forEach(s => {
+    const exists = regexFilters.some(r => r.pattern === s.pattern && r.type === s.type);
+    if (!exists) regexFilters.push(s);
+  });
+
+  await chrome.storage.local.set({ [STORE_NAMES.REGEX_FILTERS]: regexFilters });
+  return await getRegexRules();
+}
+
+async function setUpdateTimeInterval() {
+  setInterval(async () => {
+    updateBadge();
+  }, 60000); // atualiza a cada 60 segundos
+}
+
+// Utilities
+async function getRegexRules() {
+  const stored = await chrome.storage.local.get(STORE_NAMES.REGEX_FILTERS);
+  return (stored[STORE_NAMES.REGEX_FILTERS] || []).map(r => ({
+    pattern: new RegExp(r.pattern, 'i'),
+    type: r.type
+  }));
+}
+
+async function getNotifiedTabs() {
+  const stored = await chrome.storage.local.get(STORE_NAMES.NOTIFIED_TABS);
+  return stored[STORE_NAMES.NOTIFIED_TABS] || {};
+}
+
+async function clearNotification(tabId) {
+  const notifiedTabs = await getNotifiedTabs();
+  if (notifiedTabs[tabId]) {
+    delete notifiedTabs[tabId];
+    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_TABS]: notifiedTabs });
+    await updateBadge(notifiedTabs);
+  }
+}
+
+
+async function updateBadge(notifiedTabs) {
+  notifiedTabs = notifiedTabs || await getNotifiedTabs();
+  const now = Date.now();
+  const tabIds = Object.keys(notifiedTabs);
+  if (tabIds.length === 0 || ((await getNotificationMode() !== 'both') && (await getNotificationMode() !== 'badge'))) {
+    chrome.action.setBadgeText({ text: '' });
+    return;
+  }
+
+  const times = tabIds.map(id => now - notifiedTabs[id]);
+  const oldest = Math.min(...times);
+
+  const timeAsHuman = UTILS.getTimeAsHuman(oldest);
+  const messageMinutes = UTILS.getTimeInMinutes(oldest);
+
+  const stored = await chrome.storage.local.get(STORE_NAMES.BADGE_COLOR_SCHEME);
+  const scheme = stored[STORE_NAMES.BADGE_COLOR_SCHEME] || DEFAULT_BADGE_COLORS;
+  const selectedColor = scheme.findLast(s => s.threshold <= messageMinutes)?.color || 'red';
+
+  chrome.action.setBadgeText({ text: timeAsHuman });
+  chrome.action.setBadgeBackgroundColor({ color: selectedColor });
+}
+
+async function getNotificationMode() {
+  const stored = await chrome.storage.local.get(STORE_NAMES.NOTIFICATION_MODE);
+  return stored[STORE_NAMES.NOTIFICATION_MODE] || 'badge';
+}
+
+async function onReload() {
+  await setDefaultColorSchema();
+  regexRules = await initRegexFilters();
+}
+
+onReload();
