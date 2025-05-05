@@ -107,6 +107,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   let matchedTabsQuantity = 0;
+  const now = Date.now();
   tabs.forEach(tab => {
     const matchedFilters = regexFilters.filter(rule => {
       const regex = new RegExp(rule.pattern, 'i');
@@ -125,7 +126,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (tabWithNotification) {
       const notificationItem = document.createElement('li');
       const favicon = tab.favIconUrl ? `<img src="${tab.favIconUrl}" alt="favicon" style="width:16px;height:16px;vertical-align:middle;margin-right:5px;border-radius:50%;">` : '';
-      notificationItem.innerHTML = `${favicon} <span class="match-highlight-title">${tab.title}</span> (${UTILS.getTimeAsHuman(tabWithNotification)})<br><small>${highlightRegexMatches(tab.url, matchesSomeFilter.pattern)}</small>`;
+      notificationItem.innerHTML = `${favicon} <span class="match-highlight-title">${tab.title}</span> (<i>${UTILS.getTimeAsHuman((now - tabWithNotification))}</i>)<br><small>${highlightRegexMatches(tab.url, matchesSomeFilter.pattern)}</small>`;
       notificationItem.style.cursor = 'pointer';
       notificationItem.tabIndex = 0;
       notificationItem.onclick = () => {

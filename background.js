@@ -5,12 +5,14 @@ import { MESSAGE_NAMES, STORE_NAMES } from "./utils.js";
 // === background.js ===
 let lastTitles = {};
 let regexRules = [];
+let timeoutId = null;
 
 chrome.runtime.onInstalled.addListener(async () => {
   setUpdateTimeInterval();
   await onReload();
   onReload = () => {};
 });
+
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === MESSAGE_NAMES.UPDATE_BADGE_NOW) {
@@ -144,7 +146,9 @@ async function initRegexFilters() {
 }
 
 async function setUpdateTimeInterval() {
-  setInterval(async () => {
+  clearInterval(timeoutId);
+  updateBadge();
+  timeoutId = setInterval(async () => {
     updateBadge();
   }, 60000); // atualiza a cada 60 segundos
 }
@@ -183,7 +187,7 @@ async function updateBadge(notifiedTabs) {
   }
 
   const times = tabIds.map(id => now - notifiedTabs[id]);
-  const oldest = Math.min(...times);
+  const oldest = Math.max(...times);
 
   const timeAsHuman = UTILS.getTimeAsHuman(oldest);
   const messageMinutes = UTILS.getTimeInMinutes(oldest);
@@ -204,6 +208,7 @@ async function getNotificationMode() {
 async function onReload() {
   await setDefaultColorSchema();
   regexRules = await initRegexFilters();
+  await setUpdateTimeInterval();
 }
 
 onReload();
