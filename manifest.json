@@ -1,9 +1,9 @@
 {
-  "name": "Inbox Radar: Tab title changes notifyer, for Gmail, WhatsApp, Slack & more",
-  "short_name": "Inbox Radar",
-  "version": "1.0.0",
+  "name": "Tab Alerts – Gmail, Outlook & Chat Notifications",
+  "short_name": "Tab Alerts",
+  "version": "1.1.0",
   "manifest_version": 3,
-  "description": "Get notified about messages from Gmail, WhatsApp, Slack, and other tabs— by monitoring title changes",
+  "description": "Get tab alerts for Gmail, Outlook, Slack & more. Never miss messages—get notified by title or favicon changes",
   "author": "Danilo da Silveira Figueira",
   "icons": {
     "128": "icons/icon128.png"
