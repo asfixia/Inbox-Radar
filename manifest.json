@@ -1,9 +1,9 @@
 {
-  "name": "Tab Alerts – Gmail, Outlook & Chat Notifications",
-  "short_name": "Tab Alerts",
+  "name": "FocusPing – Smart Notifications for Background Tabs",
+  "short_name": "FocusPing",
   "version": "1.1.0",
   "manifest_version": 3,
-  "description": "Get tab alerts for Gmail, Outlook, Slack & more. Never miss messages—get notified by title or favicon changes",
+  "description": "Stay in flow. FocusPing notifies only when important messages arrive —no more tab-checking. Works with Gmail, Slack, WhatsApp & more",
   "author": "Danilo da Silveira Figueira",
   "icons": {
     "128": "icons/icon128.png"
