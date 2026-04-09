@@ -3,3 +3,4 @@ Get notified about new messages in Gmail, WhatsApp Web, Slack, Outlook, and othe
 
 📌 Privacidade em primeiro lugar: Inbox Radar não lê nem acessa o conteúdo das páginas. Ele apenas monitora o título e a URL da aba para detectar notificações como "Nova mensagem".
 
+Link on Chrome extension store: [https://chromewebstore.google.com/detail/all-in-one-message-notifi/cefobdcaibndecpfofboeiebejehmjpb](https://chromewebstore.google.com/detail/all-in-one-message-notifi/cefobdcaibndecpfofboeiebejehmjpb)
