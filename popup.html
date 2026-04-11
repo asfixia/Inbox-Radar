@@ -4,21 +4,37 @@
     <meta charset="UTF-8">
     <title>Tab Watcher</title>
     <style>
+        /* Reserve scrollbar width so tab content width stays the same with or without overflow */
+        html {
+            scrollbar-gutter: stable;
+            overflow-x: hidden;
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+        }
+
         body {
             font-family: sans-serif;
             width: 460px;
-            padding: 10px;
+            max-width: 460px;
+            margin: 0;
+            padding: 8px;
+            min-height: 520px;
+            overflow-x: hidden;
         }
 
         label {
             display: block;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         }
 
         .regex-row {
             display: flex;
             align-items: center;
-            margin-bottom: 5px;
+            margin-bottom: 4px;
         }
 
         .regex-row input, .regex-row select {
@@ -55,7 +71,7 @@
             background: #f0f0f0;
             border: none;
             border-bottom: 2px solid transparent;
-            padding: 6px 10px;
+            padding: 5px 8px;
             font-weight: bold;
             cursor: pointer;
             transition: all 0.2s ease-in-out;
@@ -83,7 +99,7 @@
 
         .section {
             display: none;
-            margin-top: 15px;
+            margin-top: 10px;
         }
 
         .section.active {
@@ -91,22 +107,44 @@
         }
 
         ul {
-            padding-left: 18px;
+            padding-left: 16px;
         }
 
         li {
-            margin-bottom: 5px;
+            margin-bottom: 6px;
+        }
+
+        #notification-list li,
+        #matched-list li {
+            padding-bottom: 6px;
+            border-bottom: 1px solid #f1f3f4;
+            margin-bottom: 8px;
+        }
+
+        #notification-list li:last-child,
+        #matched-list li:last-child {
+            border-bottom: none;
+            padding-bottom: 0;
+            margin-bottom: 0;
+        }
+
+        #notification-area {
+            margin-bottom: 12px;
+        }
+
+        #matched-area {
+            margin-top: 12px;
         }
 
         h3, h4 {
-            margin-bottom: 6px;
-            margin-top: 12px;
+            margin-bottom: 5px;
+            margin-top: 10px;
         }
 
         .message {
             color: green;
             font-size: 12px;
-            margin-top: 5px;
+            margin-top: 4px;
             display: none;
         }
 
@@ -134,35 +172,359 @@
             background-color: lightgray;
         }
 
-        .notification-options {
-            margin-top: 12px;
+        .adv-notif-h4 {
+            margin: 14px 0 6px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #202124;
         }
 
-        .notification-options label {
-            font-size: 14px;
+        .adv-notif-pair {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 8px;
+            margin-bottom: 8px;
+            align-items: stretch;
+        }
+
+        .adv-notif-pair > .adv-block {
+            margin-bottom: 0;
+        }
+
+        .adv-notif-pair .adv-sub {
+            margin-left: 0;
+            margin-top: 8px;
+            padding-left: 9px;
+        }
+
+        .adv-notif-pair .help-panel {
+            margin-left: 0;
+        }
+
+        .adv-block {
+            margin-bottom: 8px;
+            border: 1px solid #e8eaed;
+            border-radius: 6px;
+            padding: 8px 10px;
+            background: #fafafa;
+        }
+
+        .adv-row-head {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            flex-wrap: wrap;
+            min-height: 26px;
+        }
+
+        .adv-row-icon {
+            font-size: 15px;
+            line-height: 1;
+            width: 20px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        /* Same neutral frame for toolbar and digest icons */
+        .adv-pin-visual,
+        .adv-digest-visual {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border: 1px solid #dadce0;
+            border-radius: 6px;
+            background: #fff;
+            flex-shrink: 0;
+        }
+
+        .adv-ext-icon {
+            width: 18px;
+            height: 18px;
+            border-radius: 4px;
             display: block;
-            margin-bottom: 5px;
+        }
+
+        .adv-digest-img {
+            width: 18px;
+            height: 18px;
+            display: block;
+        }
+
+        .adv-row-main {
+            flex: 1;
+            min-width: 0;
+            font-size: 12px;
+        }
+
+        .adv-row-main input {
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+
+        .help-btn {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 1px solid #dadce0;
+            background: #fff;
+            color: #5f6368;
+            font-size: 11px;
+            font-weight: 600;
+            line-height: 1;
+            padding: 0;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+
+        .help-btn:hover {
+            background: #f1f3f4;
+        }
+
+        .help-btn[aria-expanded="true"] {
+            background: #e8f0fe;
+            border-color: #1a73e8;
+            color: #174ea6;
+        }
+
+        .help-panel {
+            display: none;
+            font-size: 10px;
+            line-height: 1.35;
+            color: #5f6368;
+            margin: 3px 0 0 26px;
+        }
+
+        .help-panel.is-open {
+            display: block;
+        }
+
+        .adv-sub {
+            margin: 8px 0 0 26px;
+            padding: 3px 0 2px 9px;
+            border-left: 2px solid #dadce0;
+        }
+
+        .adv-sub.is-muted {
+            opacity: 0.45;
+            pointer-events: none;
+        }
+
+        .adv-sub label,
+        .adv-sub .sub-line {
+            display: block;
+            font-size: 11px;
+            margin-bottom: 3px;
+            color: #3c4043;
+        }
+
+        .adv-sub input[type="range"] {
+            width: 100%;
+            max-width: 200px;
+            vertical-align: middle;
+            margin-right: 4px;
+        }
+
+        .adv-sub select {
+            font: inherit;
+            font-size: 11px;
+            padding: 1px 4px;
+            max-width: 100%;
+        }
+
+        .compact-persist {
+            font-size: 11px;
+            line-height: 1.35;
+        }
+
+        .adv-toggle-preview {
+            display: none;
+            margin-top: 7px;
+            padding: 4px 7px;
+            font-size: 10px;
+            line-height: 1.4;
+            color: #3c4043;
+            background: #fff;
+            border: 1px solid #e8eaed;
+            border-radius: 5px;
+        }
+
+        .adv-toggle-preview.visible { display: block; }
+        .adv-toggle-preview.is-ok  { border-color: #34a853; color: #1e6e34; background: #f0fdf4; }
+        .adv-toggle-preview.is-err { border-color: #c5221f; background: #fce8e6; color: #1f1f1f; }
+
+        /* Same family as .adv-block — reads as part of “Notifications” above */
+        .adv-emoji-frame {
+            font-size: 13px;
+            line-height: 1;
         }
 
         #test-notif-tip {
-            margin-top: 10px;
-            padding: 10px;
-            background: #fff3cd;
-            border: 1px solid #ffeeba;
+            margin-top: 12px;
+            padding: 10px 12px;
+            background: #fafafa;
+            border: 1px solid #e8eaed;
+            border-left: 3px solid #1a73e8;
             border-radius: 6px;
-            font-size: 13px;
-            color: #856404;
-            position: relative;
+            color: #3c4043;
+            max-height: 440px;
+            overflow: hidden;
+            opacity: 1;
+            transform: translateY(0);
+            transition:
+                opacity 0.32s ease,
+                max-height 0.38s ease,
+                margin-top 0.38s ease,
+                padding 0.38s ease,
+                transform 0.32s ease,
+                border-color 0.32s ease,
+                background 0.32s ease;
         }
 
-        #dismiss-notification-test {
-            position: absolute;
-            top: 4px;
-            right: 8px;
-            background: none;
+        .adv-test-head {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
+        .adv-test-icons {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            flex-shrink: 0;
+            padding-top: 1px;
+        }
+
+        .adv-test-icon-btn {
+            padding: 0;
+            margin: 0;
             border: none;
-            font-size: 16px;
+            background: transparent;
             cursor: pointer;
+            border-radius: 6px;
+            line-height: 0;
+            transition: transform 0.12s ease;
+        }
+
+        .adv-test-icon-btn:hover {
+            transform: scale(1.06);
+        }
+
+        .adv-test-icon-btn:focus-visible {
+            outline: 2px solid #1a73e8;
+            outline-offset: 2px;
+        }
+
+        .adv-test-icon-btn[aria-pressed="false"] .adv-test-icon-sm,
+        .adv-test-icon-btn[aria-pressed="false"] .adv-test-icon-emoji {
+            opacity: 0.38;
+            filter: grayscale(1);
+        }
+
+        .adv-test-icon-sm {
+            width: 18px;
+            height: 18px;
+            border-radius: 4px;
+            border: 1px solid #dadce0;
+            background: #fff;
+            display: block;
+            object-fit: contain;
+            pointer-events: none;
+            transition: opacity 0.15s ease, filter 0.15s ease;
+        }
+
+        .adv-test-icon-emoji {
+            width: 22px;
+            height: 22px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            border: 1px solid #dadce0;
+            border-radius: 6px;
+            background: #fff;
+            pointer-events: none;
+            transition: opacity 0.15s ease, filter 0.15s ease;
+        }
+
+        .adv-test-head-text {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .adv-test-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #202124;
+            line-height: 1.25;
+        }
+
+        .adv-test-sub {
+            font-size: 11px;
+            color: #5f6368;
+            line-height: 1.35;
+            margin-top: 3px;
+        }
+
+        .adv-test-note {
+            font-size: 10px;
+            color: #5f6368;
+            margin: 8px 0 0;
+            line-height: 1.35;
+        }
+
+        #run-notification-test {
+            margin-top: 8px;
+            font-size: 12px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: 1px solid #dadce0;
+            background: #fff;
+            cursor: pointer;
+            color: #202124;
+            font-weight: 500;
+        }
+
+        #run-notification-test:hover {
+            background: #f1f3f4;
+            border-color: #1a73e8;
+        }
+
+        @keyframes advTestPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(26, 115, 232, 0.42); }
+            50% { box-shadow: 0 0 0 9px rgba(26, 115, 232, 0); }
+        }
+
+        #run-notification-test.pulse-hint {
+            animation: advTestPulse 1.05s ease-out 2;
+            border-color: #1a73e8;
+        }
+
+        #notification-test-output {
+            display: none;
+            margin-top: 8px;
+            padding: 6px 8px;
+            background: #fff;
+            border: 1px solid #e8eaed;
+            border-radius: 6px;
+            font-size: 11px;
+            line-height: 1.35;
+            color: #3c4043;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        #notification-test-output.visible {
+            display: block;
+        }
+
+        #notification-test-output.is-error {
+            border-color: #c5221f;
+            background: #fce8e6;
+            color: #1f1f1f;
         }
 
         .match-highlight {
@@ -201,7 +563,20 @@
         }
 
         #matched-list li {
-          margin: 0 0 5px 0;
+          margin: 0 0 8px 0;
+        }
+
+        #tab-work-notice {
+            display: none;
+            font-size: 10px;
+            line-height: 1.3;
+            color: #80868b;
+            margin: 0 0 6px 0;
+            padding: 0;
+        }
+
+        #tab-work-notice.tab-work-notice--visible {
+            display: block;
         }
     </style>
 </head>
@@ -213,16 +588,20 @@
 </div>
 
 <div class="section notification active" role="region" aria-label="Notifications">
+    <p id="tab-work-notice" aria-live="polite"></p>
     <div id="notification-area">
         <h3 id="notifications-title" style="display:none;" aria-live="polite">Unread Notifications</h3>
         <ul id="notification-list" role="list"></ul>
         <div id="no-notifications" style="display:none; cursor: pointer;">No notifications yet.<br>Go to "🎯 Filters" to add some rules!</div>
         <button id="clear-badge" style="display:none;" title="Limpar notificações não lidas">Clear Notifications
         </button>
+        <button type="button" id="show-summary-notification" style="display:none;" title="Refresh the digest notification (Popup or Both mode)">
+            Summarize unread (desktop)
+        </button>
         <div id="clear-message" class="message">✔️ Notifications cleared!</div>
     </div>
 
-    <div id="matched-area" style="margin-top:15px;">
+    <div id="matched-area">
         <h4 id="matched-title" style="display:none;">Matched tabs <span id="matched-title-quantity">(0)</span></h4>
         <ul id="matched-list" class="numbered-list" role="list"></ul>
         <div id="no-matched" style="display:none; cursor: pointer;">No tabs matched current filters. Try adding more
@@ -241,18 +620,86 @@
 
 <div class="section advanced" role="region" aria-label="Advanced options">
 
-    <div class="notification-options">
-        <h4>Notification Type</h4>
-        <label><input type="radio" name="notification-type" value="badge" checked> Only show icon badge</label>
-        <label><input type="radio" name="notification-type" value="popup"> Show popup notification</label>
-        <label><input type="radio" name="notification-type" value="both"> Both badge and popup</label>
+    <h4 class="adv-notif-h4">Notifications</h4>
+
+    <div class="adv-notif-pair" role="group" aria-label="Toolbar badge and desktop digest">
+        <div class="adv-block" data-adv="badge">
+            <div class="adv-row-head">
+                <span class="adv-pin-visual" title="This extension’s icon on the Chrome toolbar (pin it to see the badge)">
+                    <img class="adv-ext-icon" src="icons/icon128.png" width="18" height="18" alt="">
+                </span>
+                <label class="adv-row-main"><input type="checkbox" id="opt-badge" checked> Toolbar badge on icon</label>
+                <button type="button" class="help-btn" aria-expanded="false" aria-label="Help: toolbar badge">?</button>
+            </div>
+            <div class="help-panel" id="help-badge">
+                Elapsed time on this extension’s pinned icon. Separate from the silent desktop digest toast.
+            </div>
+            <div class="adv-toggle-preview" id="badge-preview"></div>
+        </div>
+
+        <div class="adv-block" data-adv="popup">
+            <div class="adv-row-head">
+                <span class="adv-digest-visual" title="Chrome desktop notification (silent digest list)">
+                    <img class="adv-digest-img" src="icons/pop-up-notification.png" width="18" height="18" alt="">
+                </span>
+                <label class="adv-row-main"><input type="checkbox" id="opt-popup"> Desktop digest toast</label>
+                <button type="button" class="help-btn" aria-expanded="false" aria-label="Help: popup digest">?</button>
+            </div>
+            <div class="help-panel" id="help-popup">
+                One silent Chrome notification listing unread sites — not this settings window.
+            </div>
+            <div class="adv-sub" id="popup-sub">
+                <label class="compact-persist"><input type="checkbox" id="warn-persistent" checked> Keep toast until dismissed</label>
+            </div>
+            <div class="adv-toggle-preview" id="popup-preview"></div>
+        </div>
     </div>
 
-    <div id="test-notif-tip">
-        🔔 <strong>Notification test:</strong><br/>
-        Click to check if the system allows popup notifications.<br/>
-        <button id="run-notification-test" style="margin-top:5px;">Open a popup for testing notifications</button>
-        <button id="dismiss-notification-test" title="Do not show this section again">×</button>
+    <div class="adv-block" data-adv="sound">
+        <div class="adv-row-head">
+            <span class="adv-digest-visual adv-emoji-frame" title="Short chime played inside the extension">🔊</span>
+            <label class="adv-row-main"><input type="checkbox" id="warn-sound" checked> Extension chime</label>
+            <button type="button" class="help-btn" aria-expanded="false" aria-label="Help: extension chime">?</button>
+        </div>
+        <div class="help-panel" id="help-sound">
+            Plays when a background tab matches your filters. The digest toast stays silent. Chrome 109+.
+        </div>
+        <div class="adv-sub" id="sound-sub">
+            <label>Tone <select id="chime-sound" aria-label="Chime tone">
+                    <option value="soft">Soft</option>
+                    <option value="bright">Bright</option>
+                    <option value="low">Low</option>
+                </select></label>
+            <label class="sub-line">Length <input type="range" id="chime-duration" min="200" max="1500" step="50" value="500" aria-valuetext=""> <span id="chime-duration-val">500 ms</span></label>
+            <label class="sub-line">Volume <input type="range" id="chime-volume" min="5" max="100" step="5" value="85" aria-label="Chime volume"></label>
+        </div>
+    </div>
+
+    <div id="test-notif-tip" aria-labelledby="adv-test-title">
+        <div class="adv-test-head">
+            <div class="adv-test-icons" role="group" aria-label="Toggle badge, digest, and chime">
+                <button type="button" class="adv-test-icon-btn" id="adv-test-toggle-badge" aria-label="Toggle toolbar badge" aria-pressed="true">
+                    <img class="adv-test-icon-sm" src="icons/icon128.png" width="18" height="18" alt="">
+                </button>
+                <button type="button" class="adv-test-icon-btn" id="adv-test-toggle-digest" aria-label="Toggle desktop digest" aria-pressed="false">
+                    <img class="adv-test-icon-sm" src="icons/pop-up-notification.png" width="18" height="18" alt="">
+                </button>
+                <button type="button" class="adv-test-icon-btn" id="adv-test-toggle-chime" aria-label="Toggle extension chime" aria-pressed="true">
+                    <span class="adv-test-icon-emoji">🔊</span>
+                </button>
+            </div>
+            <div class="adv-test-head-text">
+                <div id="adv-test-title" class="adv-test-title">Try your notification settings</div>
+                <div class="adv-test-sub">
+                    Runs a one-time sample for each option you turned on above: toolbar badge, desktop digest, and extension chime.
+                </div>
+            </div>
+        </div>
+        <p class="adv-test-note">
+            Tap the icons to turn options on or off (same as the checkboxes above). This strip does not replace real notifications — unread items still update from your tabs.
+        </p>
+        <button type="button" id="run-notification-test">Test all enabled notifications</button>
+        <div id="notification-test-output" role="status" aria-live="polite"></div>
     </div>
 
     <div>

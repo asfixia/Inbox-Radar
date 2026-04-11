@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Get started</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.45;
+      color: #1f1f1f;
+      background: #e8eaed;
+    }
+    .wrap {
+      width: 100%;
+      max-width: min(72rem, 100%);
+      margin: 0 auto;
+      padding: 1.25rem clamp(0.75rem, 3vw, 1.75rem) 2rem;
+    }
+    .brand {
+      text-align: center;
+      margin-bottom: 1rem;
+    }
+    .brand h1 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: -0.02em;
+    }
+    .brand p {
+      margin: 0.35rem 0 0;
+      font-size: 13px;
+      color: #5f6368;
+      max-width: 42rem;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .panel {
+      background: #fff;
+      border-radius: 12px;
+      padding: 1.1rem 1rem;
+      margin-bottom: 0.85rem;
+      box-shadow: 0 1px 2px rgba(60,64,67,0.15), 0 1px 3px 1px rgba(60,64,67,0.1);
+    }
+    .panel > h2 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #80868b;
+      margin: 0 0 0.85rem;
+    }
+    .muted {
+      font-size: 12px;
+      color: #80868b;
+      line-height: 1.4;
+    }
+    /* Numbered steps */
+    .steps { margin: 0; }
+    .step {
+      display: grid;
+      grid-template-columns: 2rem 1fr;
+      gap: 0 0.85rem;
+      align-items: start;
+      margin-bottom: 1rem;
+    }
+    .step:last-child { margin-bottom: 0; }
+    .step-num {
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      background: #1a73e8;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+    .step-body { min-width: 0; }
+    .step-body p {
+      margin: 0 0 0.5rem;
+      font-size: 14px;
+      color: #3c4043;
+    }
+    .step-body p:last-child { margin-bottom: 0; }
+    .step-body figure { margin: 0.65rem 0 0; }
+    .btn {
+      display: block;
+      width: 100%;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 0.6rem 0.75rem;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      text-align: center;
+    }
+    .btn + .btn { margin-top: 0.5rem; }
+    .btn-primary { background: #1a73e8; color: #fff; }
+    .btn-primary:hover { background: #1557b0; }
+    .btn-outline {
+      background: #fff;
+      color: #1a73e8;
+      border: 1px solid #dadce0;
+    }
+    .btn-outline:hover { background: #f8f9fa; }
+    figure { margin: 0; }
+    figure img {
+      display: block;
+      width: 100%;
+      border-radius: 8px;
+      border: 1px solid #e8eaed;
+      background: #fafafa;
+      object-fit: contain;
+      object-position: top center;
+    }
+    .pin-slide-inner {
+      width: 100%;
+      text-align: left;
+    }
+    .pin-slide-inner > .btn { margin-top: 0.35rem; }
+    .pin-slide-lead {
+      margin: 0 0 0.35rem;
+      font-size: 14px;
+      color: #3c4043;
+    }
+    .pin-way-subtitle {
+      margin: 0 0 0.4rem;
+      font-size: 14px;
+      font-weight: 600;
+      color: #202124;
+    }
+    .pin-copy {
+      margin: 0 0 0.5rem;
+      font-size: 13px;
+      color: #3c4043;
+      line-height: 1.45;
+    }
+    .pin-divider {
+      border-top: 1px solid #e8eaed;
+      margin: 1rem 0 0;
+      padding-top: 1rem;
+    }
+    .pin-card {
+      border: 1px solid #e8eaed;
+      border-radius: 10px;
+      padding: 0.75rem;
+      background: #fafafa;
+      margin-top: 0.75rem;
+    }
+    .pin-card:first-of-type { margin-top: 0.65rem; }
+    .pin-card h3 {
+      margin: 0 0 0.45rem;
+      font-size: 13px;
+      font-weight: 600;
+      color: #202124;
+    }
+    .carousel-viewport.carousel--pin {
+      min-height: 0;
+      align-items: flex-start;
+    }
+    .pin-carousel-slide {
+      align-items: flex-start !important;
+      justify-content: flex-start !important;
+      padding: 0.5rem 0.35rem 0.65rem;
+    }
+    .pin-carousel-slide figure { margin-top: 0.5rem; }
+    .img-details { max-height: min(420px, 62vh); min-height: 200px; }
+    .img-menu { max-height: min(380px, 55vh); min-height: 160px; }
+    .img-slide {
+      width: 100%;
+      max-height: min(400px, 52vh);
+      min-height: 220px;
+      object-fit: contain;
+    }
+    /* Carousel */
+    .use-steps {
+      list-style: none;
+      padding: 0;
+      margin: 0 0 0.75rem;
+      font-size: 13px;
+      color: #3c4043;
+    }
+    .use-steps li {
+      display: grid;
+      grid-template-columns: 1.5rem 1fr;
+      gap: 0.35rem 0.5rem;
+      margin-bottom: 0.35rem;
+      align-items: baseline;
+    }
+    .use-steps li:last-child { margin-bottom: 0; }
+    .use-steps .n {
+      font-weight: 700;
+      color: #1a73e8;
+      font-size: 12px;
+    }
+    .carousel { margin-top: 0.25rem; }
+    .carousel-viewport {
+      overflow: hidden;
+      border-radius: 8px;
+      touch-action: pan-y pinch-zoom;
+      border: 1px solid #e8eaed;
+      background: #fafafa;
+      min-height: min(360px, 52vh);
+      display: flex;
+      align-items: center;
+    }
+    .carousel-track {
+      display: flex;
+      transition: transform 0.25s ease-out;
+      width: 100%;
+    }
+    .carousel-slide {
+      min-width: 100%;
+      flex: 0 0 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.35rem;
+    }
+    .carousel-slide img {
+      border: none;
+      border-radius: 6px;
+      max-height: min(400px, 52vh);
+    }
+    .carousel-meta {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-top: 0.55rem;
+    }
+    .step-pill {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #1a73e8;
+      background: #e8f0fe;
+      padding: 0.2rem 0.5rem;
+      border-radius: 999px;
+    }
+    .carousel-caption {
+      font-size: 13px;
+      margin: 0.35rem 0 0;
+      flex: 1;
+      min-width: 0;
+    }
+    .carousel-caption strong {
+      display: block;
+      font-size: 14px;
+      color: #202124;
+      margin-bottom: 0.15rem;
+    }
+    .carousel-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.45rem;
+      margin-top: 0.45rem;
+    }
+    .carousel-bar button.nav {
+      width: 2.25rem;
+      height: 2.25rem;
+      padding: 0;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      background: #fff;
+      font-size: 1.1rem;
+      line-height: 1;
+      color: #5f6368;
+      cursor: pointer;
+    }
+    .carousel-bar button.nav:hover { background: #f1f3f4; }
+    .carousel-dots {
+      display: flex;
+      gap: 6px;
+      justify-content: center;
+      flex: 1;
+    }
+    .carousel-dots button {
+      width: 8px;
+      height: 8px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: #dadce0;
+      cursor: pointer;
+    }
+    .carousel-dots button[aria-selected="true"] { background: #1a73e8; }
+    .pt {
+      text-align: center;
+      font-size: 11px;
+      color: #9aa0a6;
+      margin: 0.75rem 0 0;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="brand">
+      <h1>All-in-One Message Notifications</h1>
+      <p>The toolbar badge appears only when a background tab updates and matches your filters.</p>
+    </header>
+
+    <section class="panel" aria-labelledby="pin-label">
+      <h2 id="pin-label">Pin extension tool</h2>
+      <p class="muted" style="margin:0 0 0.65rem;">Three ways to keep the icon on the toolbar. Pick <strong>1</strong>, <strong>2</strong>, or <strong>3</strong> below (swipe on the image row or use the arrows).</p>
+
+      <div class="carousel" id="pin-carousel">
+        <div class="carousel-viewport carousel--pin" id="pin-carousel-viewport">
+          <div class="carousel-track" id="pin-carousel-track">
+            <div
+              class="carousel-slide pin-carousel-slide"
+              data-title="Open the panel, then pin from the toolbar"
+              data-desc="Best when the extension icon already appears in the toolbar (even if you still want to pin it)."
+            >
+              <div class="pin-slide-inner">
+                <p class="pin-slide-lead">Step 1: Open the extension.</p>
+                <button type="button" class="btn btn-primary js-open-extension">Open extension</button>
+                <div class="pin-divider">
+                  <h3 class="pin-way-subtitle">Pin from the toolbar</h3>
+                  <p class="pin-copy">
+                    Right-click the <strong>extension icon</strong> (bell) in the toolbar, then choose <strong>Fixar</strong> / <strong>Pin</strong>.
+                    <span class="muted">(PT: Fixar na barra de ferramentas.)</span>
+                  </p>
+                  <figure>
+                    <img class="img-menu" src="welcome-assets/pin-context-menu.png" alt="Right-click the extension icon, then choose Fixar or Pin" loading="lazy" decoding="async" />
+                  </figure>
+                </div>
+              </div>
+            </div>
+
+            <div
+              class="carousel-slide pin-carousel-slide"
+              data-title="Chrome Extensions page + puzzle menu"
+              data-desc="Opens Chrome’s page for this extension, then pin from details or from the puzzle menu."
+            >
+              <div class="pin-slide-inner">
+                <p class="pin-slide-lead">Step 1: Open this extension in Chrome.</p>
+                <button type="button" class="btn btn-outline" id="open-extensions-page">Open extension in Chrome</button>
+
+                <div class="pin-card">
+                  <h3>On the Extensions page</h3>
+                  <p class="pin-copy" style="margin-bottom:0;">
+                    Turn on <strong>Pin to toolbar</strong>. The switch should be blue/on.
+                    <span class="muted">(PT: <strong>Fixar na barra de ferramentas</strong>.)</span>
+                  </p>
+                  <figure>
+                    <img class="img-details" src="welcome-assets/pin-chrome-extensions-details.png" alt="Extension details: enable Pin to toolbar" loading="lazy" decoding="async" />
+                  </figure>
+                </div>
+              </div>
+            </div>
+
+            <div
+              class="carousel-slide pin-carousel-slide"
+              data-title="Puzzle piece menu only"
+              data-desc="If you already know the extensions menu, use these three steps."
+            >
+              <div class="pin-slide-inner">
+                <div class="steps" style="margin:0;">
+                  <div class="step">
+                    <div class="step-num">1</div>
+                    <div class="step-body"><p>Click the <strong>puzzle piece</strong> (⊞ extensions).</p></div>
+                  </div>
+                  <div class="step">
+                    <div class="step-num">2</div>
+                    <div class="step-body"><p>Find <strong>All-in-One Message Notifications</strong>.</p></div>
+                  </div>
+                  <div class="step">
+                    <div class="step-num">3</div>
+                    <div class="step-body">
+                      <p>Click the <strong>pin</strong> icon on the row. <span class="muted">Tooltip: Fixar.</span></p>
+                      <figure>
+                        <img class="img-menu" src="welcome-assets/pin-extensions-menu.png" alt="Extensions list: tap the pin" loading="lazy" decoding="async" />
+                      </figure>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="carousel-meta">
+          <span class="step-pill" id="pin-carousel-step">Way 1 of 3</span>
+          <div class="carousel-caption" id="pin-carousel-live" aria-live="polite">
+            <strong id="pin-carousel-title">Open the panel, then pin from the toolbar</strong>
+            <span id="pin-carousel-desc">Best when the extension icon already appears in the toolbar (even if you still want to pin it).</span>
+          </div>
+        </div>
+        <div class="carousel-bar">
+          <button type="button" class="nav" id="pin-carousel-prev" aria-label="Previous way">‹</button>
+          <div class="carousel-dots" id="pin-carousel-dots"></div>
+          <button type="button" class="nav" id="pin-carousel-next" aria-label="Next way">›</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="use-label">
+      <h2 id="use-label">How to use</h2>
+      <ul class="use-steps">
+        <li><span class="n">1</span> <span>Click the toolbar icon → panel (Notifications, Filters, Advanced).</span></li>
+        <li><span class="n">2</span> <span>Hover the icon → badge + tooltip when something is waiting.</span></li>
+        <li><span class="n">3</span> <span>Click an unread row to open that site, or <strong>Clear Notifications</strong>.</span></li>
+      </ul>
+      <p class="muted" style="margin:0 0 0.5rem;">Photos below match each step. Swipe or use ‹ ›.</p>
+      <div class="carousel" id="usage-carousel">
+        <div class="carousel-viewport" id="carousel-viewport">
+          <div class="carousel-track" id="carousel-track">
+            <div class="carousel-slide" data-title="Click the toolbar icon" data-desc="Opens the panel: Notifications, Filters, and Advanced. Matched tabs follow your rules.">
+              <img class="img-slide" src="welcome-assets/02-click-opens-popup.png" alt="Step 1: extension popup" loading="lazy" decoding="async" />
+            </div>
+            <div class="carousel-slide" data-title="Hover the toolbar icon" data-desc="Shows the badge (wait time) and tooltip with sites and titles. No badge when nothing is pending.">
+              <img class="img-slide" src="welcome-assets/03-hover-tooltip.png" alt="Step 2: hover for badge and tooltip" loading="lazy" decoding="async" />
+            </div>
+          </div>
+        </div>
+        <div class="carousel-meta">
+          <span class="step-pill" id="carousel-step">Step 1 of 3</span>
+          <div class="carousel-caption" id="carousel-live" aria-live="polite">
+            <strong id="carousel-title">Click the toolbar icon</strong>
+            <span id="carousel-desc">Opens the panel: Notifications, Filters, and Advanced. Matched tabs follow your rules.</span>
+          </div>
+        </div>
+        <div class="carousel-bar">
+          <button type="button" class="nav" id="carousel-prev" aria-label="Previous">‹</button>
+          <div class="carousel-dots" id="carousel-dots"></div>
+          <button type="button" class="nav" id="carousel-next" aria-label="Next">›</button>
+        </div>
+      </div>
+      <button type="button" class="btn btn-primary js-open-extension" id="open-settings-footer">Open extension</button>
+    </section>
+
+    
+  </div>
+  <script src="welcome.js"></script>
+</body>
+</html>

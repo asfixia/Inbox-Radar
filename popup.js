@@ -1,6 +1,92 @@
 import { DEFAULT_SUGGESTIONS } from './suggestions.js';
-import * as UTILS from "./utils.js";
-import { MESSAGE_NAMES, STORE_NAMES } from "./utils.js";
+import * as UTILS from './utils.js';
+import {
+  CHIME_SOUND_IDS,
+  DEFAULT_WARNING_PREFS,
+  MESSAGE_NAMES,
+  STORE_NAMES,
+} from './utils.js';
+
+/** WhatsApp web favicon URLs often fail in extension pages (referrer / fetch); use embedded SVG. */
+const WHATSAPP_FAVICON_DATA_URL =
+  'data:image/svg+xml;base64,' +
+  btoa(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#25D366" d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.117 1.036 6.981 2.91a9.825 9.825 0 012.893 6.994c-.003 5.45-4.435 9.884-9.881 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>'
+  );
+
+/**
+ * @param {chrome.tabs.Tab | undefined | null} tab
+ * @returns {string}
+ */
+function faviconSrcForTab(tab) {
+  if (!tab?.url) return tab?.favIconUrl || '';
+  const host = UTILS.safeHostnameFromTabUrl(tab.url);
+  if (host === 'web.whatsapp.com') {
+    return WHATSAPP_FAVICON_DATA_URL;
+  }
+  return tab.favIconUrl || '';
+}
+
+/**
+ * @param {chrome.tabs.Tab | undefined | null} tab
+ * @returns {string}
+ */
+function faviconImgHtml(tab) {
+  const src = faviconSrcForTab(tab);
+  if (!src) return '';
+  return `<img src="${src}" alt="" width="16" height="16" style="width:16px;height:16px;vertical-align:middle;margin-right:5px;border-radius:50%;">`;
+}
+
+/**
+ * @param {{ permission?: string, channelResults?: { id: string, label: string, ok: boolean, error?: string, note?: string, fixHints?: string[] }[] }} res
+ * @param {{ headline?: string }} [opts]
+ */
+function formatNotificationTestResult(res, opts = {}) {
+  const lines = [];
+  if (opts.headline) {
+    lines.push(opts.headline);
+    lines.push('');
+  } else {
+    lines.push(
+      'Shown after you click “Test all enabled notifications”, or after a quick chime preview when you turn chime on.',
+      'Same channels as the toggles above (badge, digest, chime). Real unread updates still come from your tabs.',
+      '',
+      'Results',
+      ''
+    );
+  }
+  if (res.permission) {
+    lines.push(`Chrome notification permission: ${res.permission}`);
+    lines.push('');
+  }
+  for (const ch of res.channelResults || []) {
+    const status = ch.ok ? 'OK' : 'FAILED';
+    lines.push(`• ${ch.label}: ${status}`);
+    if (ch.error) lines.push(`  Reason: ${ch.error}`);
+    if (ch.note) lines.push(`  Note: ${ch.note}`);
+    if (ch.fixHints?.length) {
+      lines.push('  Try:');
+      for (const h of ch.fixHints) {
+        lines.push(`  – ${h}`);
+      }
+    }
+  }
+  const desktopTried = (res.channelResults || []).some((c) => c.id === 'desktop_list');
+  if (desktopTried) {
+    lines.push('');
+    lines.push(
+      'Digest toast is silent. If it shows OK but no banner: notification center (clock), Focus Assist off, Chrome allowed in Windows notifications.'
+    );
+  }
+  const chimeTried = (res.channelResults || []).some((c) => c.id === 'chime');
+  if (chimeTried) {
+    lines.push('');
+    lines.push(
+      'Chime: turn on “Extension chime” in Advanced to include this row. The digest toast stays silent.'
+    );
+  }
+  return lines.join('\n');
+}
 
 // === popup.js ===
 document.addEventListener('DOMContentLoaded', async () => {
@@ -11,6 +97,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const notificationsTitle = document.getElementById('notifications-title');
   const matchedTitle = document.getElementById('matched-title');
   const clearBadgeButton = document.getElementById('clear-badge');
+  const summaryNotifyButton = document.getElementById('show-summary-notification');
   const noNotifications = document.getElementById('no-notifications');
   const noMatched = document.getElementById('no-matched');
   const clearMessage = document.getElementById('clear-message');
@@ -23,30 +110,128 @@ document.addEventListener('DOMContentLoaded', async () => {
   const saveRegexButton = document.getElementById('save-regex');
 
   const testNotifDiv = document.getElementById('test-notif-tip');
+  const testOutputEl = document.getElementById('notification-test-output');
+  const runNotificationTestBtn = document.getElementById('run-notification-test');
 
-  const storedDismiss = await chrome.storage.local.get(STORE_NAMES.HIDE_NOTIFICATION_TEST);
-  if (storedDismiss[STORE_NAMES.HIDE_NOTIFICATION_TEST]) {
-    testNotifDiv.style.display = 'none';
+  let prevBadgeChecked = false;
+  let prevPopupChecked = false;
+  let prevSoundChecked = false;
+  let pulseCoalesceTimer = null;
+  let pulseAnimClearTimer = null;
+
+  function pulseRunTestButton() {
+    if (!runNotificationTestBtn || testNotifDiv.style.display === 'none') {
+      return;
+    }
+    runNotificationTestBtn.classList.remove('pulse-hint');
+    void runNotificationTestBtn.offsetWidth;
+    runNotificationTestBtn.classList.add('pulse-hint');
+    if (pulseAnimClearTimer) clearTimeout(pulseAnimClearTimer);
+    pulseAnimClearTimer = setTimeout(() => {
+      runNotificationTestBtn.classList.remove('pulse-hint');
+      pulseAnimClearTimer = null;
+    }, 3200);
   }
 
-  document.getElementById('run-notification-test').onclick = () => {
-    chrome.notifications.create({
-      type: 'basic',
-      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
-      title: 'Notification test',
-      message: 'If you saw this message the notifications are enabled.',
-      priority: 2
-    }, () => {
-      if (chrome.runtime.lastError) {
-        alert('Error on showing the notification. Please check the system permissions.');
-      }
-    });
-  };
+  function schedulePulseRunTest(delay = 90) {
+    clearTimeout(pulseCoalesceTimer);
+    pulseCoalesceTimer = setTimeout(() => {
+      pulseCoalesceTimer = null;
+      pulseRunTestButton();
+    }, delay);
+  }
 
-  document.getElementById('dismiss-notification-test').onclick = async () => {
-    testNotifDiv.style.display = 'none';
-    await chrome.storage.local.set({ [STORE_NAMES.HIDE_NOTIFICATION_TEST]: true });
-  };
+  function clearRunTestPulse() {
+    clearTimeout(pulseCoalesceTimer);
+    pulseCoalesceTimer = null;
+    if (pulseAnimClearTimer) {
+      clearTimeout(pulseAnimClearTimer);
+      pulseAnimClearTimer = null;
+    }
+    runNotificationTestBtn?.classList.remove('pulse-hint');
+  }
+
+  /**
+   * Shows a short inline result inside a card (badge or digest), auto-fades after 8s.
+   * @param {HTMLElement | null} el
+   * @param {string} text
+   * @param {boolean} ok
+   */
+  function showCardPreview(el, text, ok) {
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove('is-ok', 'is-err');
+    el.classList.add('visible', ok ? 'is-ok' : 'is-err');
+    clearTimeout(el._fadeTimer);
+    el._fadeTimer = setTimeout(() => {
+      el.classList.remove('visible', 'is-ok', 'is-err');
+    }, 8000);
+  }
+
+  function runChannelPreview(/** @type {('badge'|'desktop_list'|'chime')[]} */ channels, headline) {
+    if (testNotifDiv.style.display === 'none' || !channels.length) {
+      return;
+    }
+    chrome.runtime.sendMessage(
+      { action: MESSAGE_NAMES.TEST_NOTIFICATION_CHANNELS, channels },
+      (res) => {
+        if (chrome.runtime.lastError) return;
+        if (!res?.ok) {
+          showNotificationTestPanel(res?.error || 'Preview failed.', true);
+          return;
+        }
+        if (res.nothing || !res.channelResults?.length) return;
+        showNotificationTestPanel(formatNotificationTestResult(res, { headline }), false);
+      }
+    );
+  }
+
+  function showNotificationTestPanel(text, isError) {
+    if (!testOutputEl) return;
+    testOutputEl.textContent = text;
+    testOutputEl.classList.add('visible');
+    testOutputEl.classList.toggle('is-error', !!isError);
+  }
+
+  function clearNotificationTestPanel() {
+    if (!testOutputEl) return;
+    testOutputEl.textContent = '';
+    testOutputEl.classList.remove('visible', 'is-error');
+  }
+
+  if (runNotificationTestBtn) {
+    runNotificationTestBtn.onclick = () => {
+    clearRunTestPulse();
+    clearNotificationTestPanel();
+    chrome.runtime.sendMessage(
+      { action: MESSAGE_NAMES.TEST_ALL_ALERTS },
+      (res) => {
+        if (chrome.runtime.lastError) {
+          showNotificationTestPanel(
+            'Could not run test: ' + chrome.runtime.lastError.message,
+            true
+          );
+          return;
+        }
+        if (res?.nothing) {
+          showNotificationTestPanel(
+            res.hint ||
+              'Nothing to test. Turn on the toolbar badge, desktop digest, or extension chime.',
+            true
+          );
+          return;
+        }
+        if (!res?.ok) {
+          showNotificationTestPanel(res?.error || 'Test failed.', true);
+          return;
+        }
+        if (res.channelResults?.length) {
+          showNotificationTestPanel(formatNotificationTestResult(res), false);
+        }
+      }
+    );
+    };
+  }
 
   document.getElementById('show-notification').addEventListener('click', () => {
     activateOneTabOnly('notification');
@@ -68,26 +253,280 @@ document.addEventListener('DOMContentLoaded', async () => {
   noMatched.addEventListener('click', () => document.getElementById('show-filters').click());
 
 
-  document.querySelectorAll('input[name="notification-type"]').forEach(radio => {
-    radio.addEventListener('change', async () => {
-      const selectedValue = document.querySelector('input[name="notification-type"]:checked').value;
-      await chrome.storage.local.set({ [STORE_NAMES.NOTIFICATION_MODE]: selectedValue });
+  const optBadgeEl = document.getElementById('opt-badge');
+  const optPopupEl = document.getElementById('opt-popup');
+  const badgePreviewEl = document.getElementById('badge-preview');
+  const popupPreviewEl = document.getElementById('popup-preview');
+  const popupSubEl = document.getElementById('popup-sub');
+  const soundSubEl = document.getElementById('sound-sub');
+  const warnPersistentEl = document.getElementById('warn-persistent');
+  const warnSoundEl = document.getElementById('warn-sound');
+  const chimeSoundEl = document.getElementById('chime-sound');
+  const chimeDurationEl = document.getElementById('chime-duration');
+  const chimeDurationValEl = document.getElementById('chime-duration-val');
+  const chimeVolumeEl = document.getElementById('chime-volume');
+  const advTestToggleBadge = document.getElementById('adv-test-toggle-badge');
+  const advTestToggleDigest = document.getElementById('adv-test-toggle-digest');
+  const advTestToggleChime = document.getElementById('adv-test-toggle-chime');
+
+  function syncAdvTestStripIconButtons() {
+    if (advTestToggleBadge && optBadgeEl) {
+      advTestToggleBadge.setAttribute('aria-pressed', String(optBadgeEl.checked));
+    }
+    if (advTestToggleDigest && optPopupEl) {
+      advTestToggleDigest.setAttribute('aria-pressed', String(optPopupEl.checked));
+    }
+    if (advTestToggleChime && warnSoundEl) {
+      advTestToggleChime.setAttribute('aria-pressed', String(warnSoundEl.checked));
+    }
+  }
+
+  /**
+   * @param {HTMLInputElement | null} input
+   */
+  function toggleCheckboxAndEmitChange(input) {
+    if (!input) return;
+    input.checked = !input.checked;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  advTestToggleBadge?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleCheckboxAndEmitChange(optBadgeEl);
+  });
+  advTestToggleDigest?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleCheckboxAndEmitChange(optPopupEl);
+  });
+  advTestToggleChime?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleCheckboxAndEmitChange(warnSoundEl);
+  });
+
+  function deriveNotificationMode(badgeOn, popupOn) {
+    if (badgeOn && popupOn) return 'both';
+    if (badgeOn) return 'badge';
+    if (popupOn) return 'popup';
+    return 'none';
+  }
+
+  function getNotificationModeFromDom() {
+    return deriveNotificationMode(!!optBadgeEl?.checked, !!optPopupEl?.checked);
+  }
+
+  function syncPopupSubState() {
+    const on = !!optPopupEl?.checked;
+    if (popupSubEl) popupSubEl.classList.toggle('is-muted', !on);
+    if (warnPersistentEl) warnPersistentEl.disabled = !on;
+  }
+
+  function syncSoundSubState() {
+    const on = !!warnSoundEl?.checked;
+    if (soundSubEl) soundSubEl.classList.toggle('is-muted', !on);
+    const dis = !on;
+    if (chimeSoundEl) chimeSoundEl.disabled = dis;
+    if (chimeDurationEl) chimeDurationEl.disabled = dis;
+    if (chimeVolumeEl) chimeVolumeEl.disabled = dis;
+  }
+
+  function updateChimeDurationLabel() {
+    if (chimeDurationValEl && chimeDurationEl) {
+      chimeDurationValEl.textContent = `${chimeDurationEl.value} ms`;
+    }
+  }
+
+  async function persistNotificationModeFromToggles() {
+    const mode = getNotificationModeFromDom();
+    await chrome.storage.local.set({ [STORE_NAMES.NOTIFICATION_MODE]: mode });
+    chrome.runtime.sendMessage({ action: MESSAGE_NAMES.UPDATE_BADGE_NOW });
+    syncPopupSubState();
+    syncSummaryNotificationButton();
+    syncAdvTestStripIconButtons();
+  }
+
+  function syncSummaryNotificationButton() {
+    if (!summaryNotifyButton) return;
+    const hasUnread = notificationList.children.length > 0;
+    const mode = getNotificationModeFromDom();
+    summaryNotifyButton.style.display =
+      hasUnread && (mode === 'popup' || mode === 'both') ? 'inline-block' : 'none';
+  }
+
+  function readWarningPrefsFromDom() {
+    const sid = chimeSoundEl?.value;
+    const chimeSoundId = CHIME_SOUND_IDS.includes(sid) ? sid : 'soft';
+    const dur = parseInt(chimeDurationEl?.value, 10);
+    const chimeDurationMs =
+      Number.isFinite(dur) && dur >= 200 && dur <= 1500 ? dur : 500;
+    const volPct = parseInt(chimeVolumeEl?.value, 10);
+    const chimeVolume =
+      Number.isFinite(volPct) && volPct >= 5 && volPct <= 100
+        ? volPct / 100
+        : 0.85;
+    return {
+      badge: true,
+      desktopPopup: false,
+      desktopPersistent: !!warnPersistentEl?.checked,
+      desktopSound: !!warnSoundEl?.checked,
+      toolbarSummary: true,
+      chimeSoundId,
+      chimeDurationMs,
+      chimeVolume,
+    };
+  }
+
+  /**
+   * @param {{ omitTestButtonPulse?: boolean }} [opts]
+   */
+  async function saveWarningPrefs(opts = {}) {
+    await chrome.storage.local.set({
+      [STORE_NAMES.WARNING_PREFS]: readWarningPrefsFromDom(),
+    });
+    chrome.runtime.sendMessage({ action: MESSAGE_NAMES.UPDATE_BADGE_NOW });
+    syncSummaryNotificationButton();
+    if (!opts.omitTestButtonPulse) {
+      schedulePulseRunTest();
+    }
+  }
+
+  [warnPersistentEl, chimeSoundEl].forEach((el) => {
+    if (el) el.addEventListener('change', saveWarningPrefs);
+  });
+  [chimeDurationEl, chimeVolumeEl].forEach((el) => {
+    if (el) {
+      el.addEventListener('input', () => {
+        updateChimeDurationLabel();
+        saveWarningPrefs();
+        schedulePulseRunTest(280);
+      });
+    }
+  });
+  if (warnSoundEl) {
+    warnSoundEl.addEventListener('change', async () => {
+      const turnedOn = warnSoundEl.checked && !prevSoundChecked;
+      syncSoundSubState();
+      await saveWarningPrefs();
+      if (turnedOn) {
+        runChannelPreview(
+          ['chime'],
+          'Quick preview — extension chime (current tone / length / volume):'
+        );
+      }
+      prevSoundChecked = warnSoundEl.checked;
+      syncAdvTestStripIconButtons();
+    });
+  }
+
+  if (optBadgeEl) {
+    optBadgeEl.addEventListener('change', async () => {
+      const turnedOn = optBadgeEl.checked && !prevBadgeChecked;
+      await persistNotificationModeFromToggles();
+      if (turnedOn) {
+        /* updateBadge() runs on persist and may clear the demo if no unread; delay so actionSetForTest wins */
+        window.setTimeout(() => {
+          chrome.runtime.sendMessage(
+            { action: MESSAGE_NAMES.TEST_NOTIFICATION_CHANNELS, channels: ['badge'] },
+            (res) => {
+              if (chrome.runtime.lastError) return;
+              const ok = !!res?.ok && !res?.nothing;
+              const text = ok
+                ? 'Badge shown on the pinned toolbar icon — hover it to see the title.'
+                : (res?.error || 'Badge preview failed.');
+              showCardPreview(badgePreviewEl, text, ok);
+            }
+          );
+        }, 480);
+      }
+      prevBadgeChecked = optBadgeEl.checked;
+      syncAdvTestStripIconButtons();
+    });
+  }
+  if (optPopupEl) {
+    optPopupEl.addEventListener('change', async () => {
+      const turnedOn = optPopupEl.checked && !prevPopupChecked;
+      await persistNotificationModeFromToggles();
+      await saveWarningPrefs({ omitTestButtonPulse: true });
+      if (turnedOn) {
+        chrome.runtime.sendMessage(
+          { action: MESSAGE_NAMES.TEST_NOTIFICATION_CHANNELS, channels: ['desktop_list'] },
+          (res) => {
+            if (chrome.runtime.lastError) return;
+            const ok = !!res?.ok && !res?.nothing;
+            const text = ok
+              ? 'Digest toast sent — check the notification center or Windows taskbar.'
+              : (res?.error || 'Digest preview failed.');
+            showCardPreview(popupPreviewEl, text, ok);
+          }
+        );
+      }
+      prevPopupChecked = optPopupEl.checked;
+      syncAdvTestStripIconButtons();
+    });
+  }
+
+  document.querySelectorAll('.adv-block .help-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const open = btn.getAttribute('aria-expanded') === 'true';
+      const next = !open;
+      btn.setAttribute('aria-expanded', String(next));
+      const panel = btn.closest('.adv-block')?.querySelector('.help-panel');
+      if (panel) panel.classList.toggle('is-open', next);
     });
   });
 
-  document.querySelector('div.notification-options').addEventListener('change', async (event) => {
-    await chrome.storage.local.set({ [STORE_NAMES.NOTIFICATION_MODE]: event.target.value });
-    chrome.runtime.sendMessage({ action: MESSAGE_NAMES.UPDATE_BADGE_NOW });
-  });
-
-  const stored = await chrome.storage.local.get([STORE_NAMES.REGEX_FILTERS, STORE_NAMES.NOTIFIED_TABS, STORE_NAMES.NOTIFICATION_MODE]);
+  const stored = await chrome.storage.local.get([
+    STORE_NAMES.REGEX_FILTERS,
+    STORE_NAMES.NOTIFIED_BY_HOST,
+    STORE_NAMES.NOTIFICATION_MODE,
+    STORE_NAMES.WARNING_PREFS,
+  ]);
   const regexFilters = stored[STORE_NAMES.REGEX_FILTERS] || [];
-  const notifiedTabs = stored[STORE_NAMES.NOTIFIED_TABS] || {};
-  const notificationMode = stored[STORE_NAMES.NOTIFICATION_MODE] || 'badge';
+  const notifiedByHost = stored[STORE_NAMES.NOTIFIED_BY_HOST] || {};
+  const rawStoredMode = stored[STORE_NAMES.NOTIFICATION_MODE];
+  const notificationMode =
+    rawStoredMode === 'badge' ||
+    rawStoredMode === 'popup' ||
+    rawStoredMode === 'both' ||
+    rawStoredMode === 'none'
+      ? rawStoredMode
+      : 'badge';
+  const warningPrefs = { ...DEFAULT_WARNING_PREFS, ...(stored[STORE_NAMES.WARNING_PREFS] || {}) };
 
-  document.querySelectorAll('input[name="notification-type"]').forEach(radio => {
-    radio.checked = radio.value === notificationMode;
-  });
+  warnPersistentEl.checked = warningPrefs.desktopPersistent !== false;
+  warnSoundEl.checked = warningPrefs.desktopSound !== false;
+  if (chimeSoundEl) {
+    const sid = CHIME_SOUND_IDS.includes(warningPrefs.chimeSoundId)
+      ? warningPrefs.chimeSoundId
+      : 'soft';
+    chimeSoundEl.value = sid;
+  }
+  if (chimeDurationEl) {
+    const d = parseInt(warningPrefs.chimeDurationMs, 10);
+    chimeDurationEl.value = String(
+      Number.isFinite(d) && d >= 200 && d <= 1500 ? d : 500
+    );
+  }
+  if (chimeVolumeEl) {
+    const v = Number(warningPrefs.chimeVolume);
+    const pct = Number.isFinite(v) ? Math.round(v * 100) : 85;
+    chimeVolumeEl.value = String(Math.min(100, Math.max(5, pct)));
+  }
+  updateChimeDurationLabel();
+
+  const badgeOn = notificationMode === 'badge' || notificationMode === 'both';
+  const popupOn = notificationMode === 'popup' || notificationMode === 'both';
+  if (optBadgeEl) optBadgeEl.checked = badgeOn;
+  if (optPopupEl) optPopupEl.checked = popupOn;
+  syncPopupSubState();
+  syncSoundSubState();
+
+  prevBadgeChecked = !!optBadgeEl?.checked;
+  prevPopupChecked = !!optPopupEl?.checked;
+  prevSoundChecked = !!warnSoundEl?.checked;
+  syncAdvTestStripIconButtons();
 
   notificationList.innerHTML = '';
   matchedList.innerHTML = '';
@@ -106,10 +545,72 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  /**
+   * @param {chrome.tabs.Tab} tab
+   * @param {Array<{ pattern: string, type: string }>} rules
+   */
+  function tabMatchesFilters(tab, rules) {
+    if (!rules.length) return false;
+    return rules.some((rule) => {
+      try {
+        const regex = new RegExp(rule.pattern, 'i');
+        if (rule.type === 'url') return regex.test(tab.url || '');
+        if (rule.type === 'title') return regex.test(tab.title || '');
+        return false;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  const notifiedTabIdSet = new Set();
+  Object.values(notifiedByHost).forEach((entry) => {
+    (entry.tabIds || []).forEach((id) => notifiedTabIdSet.add(id));
+  });
+
+  function pickBestTab(tabObjs) {
+    if (!tabObjs.length) return null;
+    return [...tabObjs].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  }
+
   let matchedTabsQuantity = 0;
   const now = Date.now();
-  tabs.forEach(tab => {
-    const matchedFilters = regexFilters.filter(rule => {
+
+  for (const host of Object.keys(notifiedByHost)) {
+    const entry = notifiedByHost[host];
+    const tabObjs = (entry.tabIds || [])
+      .map((id) => tabs.find((t) => t.id === id))
+      .filter(Boolean);
+    const best = pickBestTab(tabObjs);
+    const sampleTab = best || tabObjs[0];
+    if (!sampleTab) continue;
+
+    const matchedFilters = regexFilters.filter((rule) => {
+      const regex = new RegExp(rule.pattern, 'i');
+      if (rule.type === 'url') return regex.test(sampleTab.url);
+      if (rule.type === 'title') return regex.test(sampleTab.title);
+      return false;
+    });
+    const matchesSomeFilter = matchedFilters.length > 0 ? matchedFilters[0] : { pattern: '.*' };
+
+    const notificationItem = document.createElement('li');
+    const favicon = faviconImgHtml(sampleTab);
+    const tabCount = tabObjs.length;
+    const tabNote = tabCount > 1 ? ` <small>(${tabCount} tabs)</small>` : '';
+    notificationItem.innerHTML = `${favicon} <span class="match-highlight-title">${host}</span>${tabNote}<br><span>${sampleTab.title || '(no title)'}</span> (<i>${UTILS.getTimeAsHuman(now - entry.since)}</i>)<br><small>${highlightRegexMatches(sampleTab.url, matchesSomeFilter.pattern)}</small>`;
+    notificationItem.style.cursor = 'pointer';
+    notificationItem.tabIndex = 0;
+    notificationItem.onclick = () => {
+      if (!best) return;
+      chrome.tabs.update(best.id, { active: true });
+      chrome.windows.update(best.windowId, { focused: true });
+    };
+    notificationList.appendChild(notificationItem);
+    foundNotification = true;
+  }
+
+  tabs.forEach((tab) => {
+    const matchedFilters = regexFilters.filter((rule) => {
       const regex = new RegExp(rule.pattern, 'i');
       if (rule.type === 'url') return regex.test(tab.url);
       if (rule.type === 'title') return regex.test(tab.title);
@@ -117,27 +618,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     const matchesSomeFilter = matchedFilters.length > 0 ? matchedFilters[0] : null;
-    const tabWithNotification = notifiedTabs[tab.id];
+    const isNotified = notifiedTabIdSet.has(tab.id);
 
-    if (!tabWithNotification && !matchesSomeFilter) return;
+    if (!isNotified && !matchesSomeFilter) return;
 
     matchedTabsQuantity++;
 
-    if (tabWithNotification) {
-      const notificationItem = document.createElement('li');
-      const favicon = tab.favIconUrl ? `<img src="${tab.favIconUrl}" alt="favicon" style="width:16px;height:16px;vertical-align:middle;margin-right:5px;border-radius:50%;">` : '';
-      notificationItem.innerHTML = `${favicon} <span class="match-highlight-title">${tab.title}</span> (<i>${UTILS.getTimeAsHuman((now - tabWithNotification))}</i>)<br><small>${highlightRegexMatches(tab.url, matchesSomeFilter.pattern)}</small>`;
-      notificationItem.style.cursor = 'pointer';
-      notificationItem.tabIndex = 0;
-      notificationItem.onclick = () => {
-        chrome.tabs.update(tab.id, { active: true });
-        chrome.windows.update(tab.windowId, { focused: true });
-      };
-      notificationList.appendChild(notificationItem);
-      foundNotification = true;
-    } else if (matchesSomeFilter) {
+    if (!isNotified && matchesSomeFilter) {
       const matchedItem = document.createElement('li');
-      const favicon = tab.favIconUrl ? `<img src="${tab.favIconUrl}" alt="favicon" style="width:16px;height:16px;vertical-align:middle;margin-right:5px;border-radius:50%;">` : '';
+      const favicon = faviconImgHtml(tab);
       matchedItem.innerHTML = `${favicon} ${tab.title}<br><small>${highlightRegexMatches(tab.url, matchesSomeFilter.pattern)}</small>`;
       matchedItem.style.opacity = 0.8;
       matchedItem.style.cursor = 'pointer';
@@ -151,16 +640,37 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  const tabWorkNoticeEl = document.getElementById('tab-work-notice');
+  if (tabWorkNoticeEl) {
+    const hasFilters = regexFilters.length > 0;
+    const anyOpenMatch =
+      hasFilters && tabs.some((t) => tabMatchesFilters(t, regexFilters));
+    if (hasFilters && !anyOpenMatch) {
+      tabWorkNoticeEl.textContent =
+        'No matching tab — open your filtered page in Chrome; keep that tab open.';
+      tabWorkNoticeEl.classList.add('tab-work-notice--visible');
+    } else {
+      tabWorkNoticeEl.textContent = '';
+      tabWorkNoticeEl.classList.remove('tab-work-notice--visible');
+    }
+  }
+
   document.getElementById('matched-title-quantity').innerHTML = ` (${matchedTabsQuantity})`;
 
+  const hasOpenTabMatchingFilters =
+    regexFilters.length > 0 && tabs.some((t) => tabMatchesFilters(t, regexFilters));
+
   notificationsTitle.style.display = foundNotification ? 'block' : 'none';
-  noNotifications.style.display = foundNotification ? 'none' : 'block';
+  noNotifications.style.display =
+    foundNotification || hasOpenTabMatchingFilters ? 'none' : 'block';
   clearBadgeButton.style.display = foundNotification ? 'inline-block' : 'none';
+  syncSummaryNotificationButton();
 
   matchedTitle.style.display = foundMatch ? 'block' : 'none';
   noMatched.style.display = foundMatch ? 'none' : 'block';
 
-  [addRegexButton, saveRegexButton, clearBadgeButton].forEach(button => {
+  [addRegexButton, saveRegexButton, clearBadgeButton, summaryNotifyButton].forEach((button) => {
+    if (!button) return;
     button.style.transition = 'background-color 0.3s, transform 0.2s';
     button.style.cursor = 'pointer';
     button.addEventListener('mouseenter', () => {
@@ -296,25 +806,36 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   clearBadgeButton.addEventListener('click', async () => {
-    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_TABS]: {} });
-    chrome.action.setBadgeText({text: ''});
+    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: {} });
+    chrome.runtime.sendMessage({ action: MESSAGE_NAMES.UPDATE_BADGE_NOW });
     notificationList.innerHTML = '';
     notificationsTitle.style.display = 'none';
-    noNotifications.style.display = 'block';
+    const tabsAfter = await chrome.tabs.query({});
+    const stillHasMatchingOpenTab =
+      regexFilters.length > 0 && tabsAfter.some((t) => tabMatchesFilters(t, regexFilters));
+    noNotifications.style.display = stillHasMatchingOpenTab ? 'none' : 'block';
     clearBadgeButton.style.display = 'none';
+    syncSummaryNotificationButton();
     clearMessage.style.display = 'block';
     setTimeout(() => clearMessage.style.display = 'none', 2000);
   });
 
+  summaryNotifyButton.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ action: MESSAGE_NAMES.SHOW_DESKTOP_SUMMARY });
+  });
+
   const colorSchemaDiv = document.getElementById('badge-color-schema');
   const storedScheme = await chrome.storage.local.get(STORE_NAMES.BADGE_COLOR_SCHEME);
+  const schemeList = storedScheme[STORE_NAMES.BADGE_COLOR_SCHEME];
   const colorItems = [];
-  storedScheme[STORE_NAMES.BADGE_COLOR_SCHEME].forEach((colorItem) => {
-    const colorSchemaItem = document.createElement('li');
-    colorSchemaItem.innerHTML = `After <input type="number" name="number" value="${colorItem.threshold}" style="width:3rem;"/> minutes <input type="color" name="color" value="${colorItem.color}"/> `;
-    colorSchemaDiv.appendChild(colorSchemaItem);
-    colorItems.push(colorSchemaItem);
-  });
+  if (Array.isArray(schemeList)) {
+    schemeList.forEach((colorItem) => {
+      const colorSchemaItem = document.createElement('li');
+      colorSchemaItem.innerHTML = `After <input type="number" name="number" value="${colorItem.threshold}" style="width:3rem;"/> minutes <input type="color" name="color" value="${colorItem.color}"/> `;
+      colorSchemaDiv.appendChild(colorSchemaItem);
+      colorItems.push(colorSchemaItem);
+    });
+  }
   if (colorItems.length > 0) {
     colorItems[0].querySelector('input[type="number"]').disabled = true;
     colorItems[colorItems.length - 1].querySelector('input[type="number"]').disabled = true;
