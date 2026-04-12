@@ -17,6 +17,8 @@ export function getTimeInMinutes(msTime) {
 /** @typedef {{ since: number, tabIds: number[] }} NotifiedHostEntry */
 
 export const STORE_NAMES = {
+  /** `'light'` | `'dark'` — popup UI only */
+  POPUP_THEME: 'popupTheme',
   BADGE_COLOR_SCHEME: 'badgeColorScheme',
   REGEX_FILTERS: 'regexFilters',
   /** @deprecated Legacy per-tab timestamps; migrated to NOTIFIED_BY_HOST */

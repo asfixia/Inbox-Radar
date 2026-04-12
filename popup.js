@@ -102,12 +102,182 @@ document.addEventListener('DOMContentLoaded', async () => {
   const noMatched = document.getElementById('no-matched');
   const clearMessage = document.getElementById('clear-message');
   const saveMessage = document.getElementById('save-message');
+  const tabWorkNoticeEl = document.getElementById('tab-work-notice');
+  const filterPartialNoticeEl = document.getElementById('filter-partial-notice');
 
-  const notificationSection = document.getElementById('notification-section');
-  const filtersSection = document.getElementById('filters-section');
+  async function initPopupTheme() {
+    const r = await chrome.storage.local.get(STORE_NAMES.POPUP_THEME);
+    const dark = r[STORE_NAMES.POPUP_THEME] === 'dark';
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    const chk = document.getElementById('popup-theme-dark');
+    if (chk) chk.checked = dark;
+  }
+  await initPopupTheme();
+  document.getElementById('popup-theme-dark')?.addEventListener('change', async (e) => {
+    const on = /** @type {HTMLInputElement} */ (e.target).checked;
+    document.documentElement.dataset.theme = on ? 'dark' : 'light';
+    await chrome.storage.local.set({ [STORE_NAMES.POPUP_THEME]: on ? 'dark' : 'light' });
+  });
 
   const addRegexButton = document.getElementById('add-regex');
   const saveRegexButton = document.getElementById('save-regex');
+
+  let filterStatusRefreshTimer = null;
+
+  /**
+   * @param {chrome.tabs.Tab} tab
+   * @param {{ pattern: string, type: string }} rule
+   */
+  function tabMatchesSingleRule(tab, rule) {
+    try {
+      const regex = new RegExp(rule.pattern, 'i');
+      if (rule.type === 'url') return regex.test(tab.url || '');
+      if (rule.type === 'title') return regex.test(tab.title || '');
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * @param {chrome.tabs.Tab} tab
+   * @param {Array<{ pattern: string, type: string }>} rules
+   */
+  function tabMatchesFilters(tab, rules) {
+    if (!rules.length) return false;
+    return rules.some((rule) => {
+      try {
+        const regex = new RegExp(rule.pattern, 'i');
+        if (rule.type === 'url') return regex.test(tab.url || '');
+        if (rule.type === 'title') return regex.test(tab.title || '');
+        return false;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * Suggest a URL to open from a URL-type regex (or fallback for title rules).
+   * @param {string} pattern
+   * @param {string} type
+   */
+  function guessOpenUrlFromFilter(pattern, type) {
+    const raw = (pattern || '').trim();
+    if (!raw) return 'https://';
+    if (/^https?:\/\//i.test(raw)) {
+      try {
+        return new URL(raw).href;
+      } catch {
+        return raw;
+      }
+    }
+    if (type === 'title') {
+      return 'https://www.google.com/';
+    }
+    const loosened = raw.replace(/^\^/, '').replace(/\$$/, '');
+    const beforeSlash = loosened.split(/[/\\?#[\]|]/)[0];
+    const hostish = beforeSlash.replace(/\([^)]*\)/g, '').replace(/\\./g, '.');
+    if (hostish.includes('.') && !/\s/.test(hostish)) {
+      let h = hostish.replace(/^\.\*?/, '').replace(/\.\*$/, '').replace(/^https?:\/\//i, '');
+      h = h.replace(/[^a-zA-Z0-9.-]/g, '');
+      if (h) return `https://${h}/`;
+    }
+    return `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
+  }
+
+  function closeAllRegexOpenPanels() {
+    regexList.querySelectorAll('.regex-open-panel').forEach((p) => {
+      p.classList.remove('is-open');
+    });
+  }
+
+  /**
+   * @param {chrome.tabs.Tab[]} openTabs
+   */
+  function refreshFilterTabStatus(openTabs) {
+    const bits = [];
+    for (const row of regexList.querySelectorAll('.regex-row')) {
+      const inp = row.querySelector('input[type="text"]');
+      const sel = row.querySelector('select');
+      const badge = row.querySelector('.regex-row-match-count');
+      if (!inp || !sel || !badge) continue;
+      const pattern = inp.value.trim();
+      if (!pattern) {
+        badge.textContent = '';
+        badge.classList.remove('regex-row-match-count--zero');
+        continue;
+      }
+      let valid = true;
+      try {
+        new RegExp(pattern);
+      } catch {
+        valid = false;
+      }
+      if (!valid) {
+        badge.textContent = 'invalid';
+        badge.classList.remove('regex-row-match-count--zero');
+        bits.push(`"${pattern.slice(0, 14)}…" (invalid)`);
+        continue;
+      }
+      const rule = { pattern, type: sel.value };
+      const n = openTabs.filter((t) => tabMatchesSingleRule(t, rule)).length;
+      badge.textContent = n === 0 ? '0 tabs' : `${n} tab${n === 1 ? '' : 's'}`;
+      badge.classList.toggle('regex-row-match-count--zero', n === 0);
+      const short = pattern.length > 18 ? `${pattern.slice(0, 18)}…` : pattern;
+      bits.push(`${short} (${rule.type}): ${n}`);
+    }
+    const statusEl = document.getElementById('filter-match-status');
+    if (statusEl) {
+      statusEl.textContent = bits.length ? `Open tabs — ${bits.join(' · ')}` : '';
+    }
+    updateFilterPartialNoticeBar(openTabs);
+  }
+
+  /**
+   * Notifications tab hint: some saved rules have no open tab while others still match.
+   * @param {chrome.tabs.Tab[]} openTabs
+   */
+  function updateFilterPartialNoticeBar(openTabs) {
+    const el = document.getElementById('filter-partial-notice');
+    if (!el) return;
+    const rules = [];
+    for (const row of regexList.querySelectorAll('.regex-row')) {
+      const inp = row.querySelector('input[type="text"]');
+      const sel = row.querySelector('select');
+      if (!inp || !sel) continue;
+      const pattern = inp.value.trim();
+      if (!pattern) continue;
+      try {
+        new RegExp(pattern);
+      } catch {
+        continue;
+      }
+      rules.push({ pattern, type: sel.value });
+    }
+    if (!rules.length) {
+      el.classList.remove('filter-partial-notice--visible');
+      return;
+    }
+    const anyMatch = openTabs.some((t) => tabMatchesFilters(t, rules));
+    const someZero = rules.some(
+      (rule) => openTabs.filter((t) => tabMatchesSingleRule(t, rule)).length === 0
+    );
+    if (anyMatch && someZero) {
+      el.textContent =
+        'Some filters match no open tab yet, open at least one to start monitoring. Can open by tab here and click on Filters "↗" button.';
+      el.classList.add('filter-partial-notice--visible');
+    } else {
+      el.classList.remove('filter-partial-notice--visible');
+    }
+  }
+
+  function scheduleRefreshFilterTabStatus() {
+    clearTimeout(filterStatusRefreshTimer);
+    filterStatusRefreshTimer = setTimeout(async () => {
+      refreshFilterTabStatus(await chrome.tabs.query({}));
+    }, 280);
+  }
 
   const testNotifDiv = document.getElementById('test-notif-tip');
   const testOutputEl = document.getElementById('notification-test-output');
@@ -233,16 +403,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
   }
 
-  document.getElementById('show-notification').addEventListener('click', () => {
+  document.getElementById('show-notification').addEventListener('click', async () => {
     activateOneTabOnly('notification');
-    document.getElementById('show-notification').classList.add('active');
-    document.getElementById('show-filters').classList.remove('active');
+    updateFilterPartialNoticeBar(await chrome.tabs.query({}));
   });
 
-  document.getElementById('show-filters').addEventListener('click', () => {
+  document.getElementById('show-filters').addEventListener('click', async () => {
     activateOneTabOnly('filters');
-    document.getElementById('show-filters').classList.add('active');
-    document.getElementById('show-notification').classList.remove('active');
+    const openTabs = await chrome.tabs.query({});
+    refreshFilterTabStatus(openTabs);
   });
 
   document.getElementById('show-advanced').addEventListener('click', () => {
@@ -251,6 +420,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   noNotifications.addEventListener('click', () => document.getElementById('show-filters').click());
   noMatched.addEventListener('click', () => document.getElementById('show-filters').click());
+
+  tabWorkNoticeEl?.addEventListener('click', () => {
+    document.getElementById('show-filters').click();
+  });
+
+  filterPartialNoticeEl?.addEventListener('click', () => {
+    document.getElementById('show-filters').click();
+  });
 
 
   const optBadgeEl = document.getElementById('opt-badge');
@@ -545,24 +722,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  /**
-   * @param {chrome.tabs.Tab} tab
-   * @param {Array<{ pattern: string, type: string }>} rules
-   */
-  function tabMatchesFilters(tab, rules) {
-    if (!rules.length) return false;
-    return rules.some((rule) => {
-      try {
-        const regex = new RegExp(rule.pattern, 'i');
-        if (rule.type === 'url') return regex.test(tab.url || '');
-        if (rule.type === 'title') return regex.test(tab.title || '');
-        return false;
-      } catch {
-        return false;
-      }
-    });
-  }
-
   const notifiedTabIdSet = new Set();
   Object.values(notifiedByHost).forEach((entry) => {
     (entry.tabIds || []).forEach((id) => notifiedTabIdSet.add(id));
@@ -597,7 +756,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const favicon = faviconImgHtml(sampleTab);
     const tabCount = tabObjs.length;
     const tabNote = tabCount > 1 ? ` <small>(${tabCount} tabs)</small>` : '';
-    notificationItem.innerHTML = `${favicon} <span class="match-highlight-title">${host}</span>${tabNote}<br><span>${sampleTab.title || '(no title)'}</span> (<i>${UTILS.getTimeAsHuman(now - entry.since)}</i>)<br><small>${highlightRegexMatches(sampleTab.url, matchesSomeFilter.pattern)}</small>`;
+    notificationItem.innerHTML = `<div class="notification-item-stack"><div class="notification-item-line--host">${favicon} <span class="match-highlight-title">${host}</span>${tabNote}</div><div class="notification-item-line--meta"><span>${sampleTab.title || '(no title)'}</span> (<i>${UTILS.getTimeAsHuman(now - entry.since)}</i>)</div><div class="notification-item-line--url"><small>${highlightRegexMatches(sampleTab.url, matchesSomeFilter.pattern)}</small></div></div>`;
     notificationItem.style.cursor = 'pointer';
     notificationItem.tabIndex = 0;
     notificationItem.onclick = () => {
@@ -627,7 +786,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!isNotified && matchesSomeFilter) {
       const matchedItem = document.createElement('li');
       const favicon = faviconImgHtml(tab);
-      matchedItem.innerHTML = `${favicon} ${tab.title}<br><small>${highlightRegexMatches(tab.url, matchesSomeFilter.pattern)}</small>`;
+      matchedItem.innerHTML = `<div class="matched-item-stack"><div class="matched-item-line--title">${favicon} ${tab.title}</div><div class="matched-item-line--url"><small>${highlightRegexMatches(tab.url, matchesSomeFilter.pattern)}</small></div></div>`;
       matchedItem.style.opacity = 0.8;
       matchedItem.style.cursor = 'pointer';
       matchedItem.tabIndex = 0;
@@ -640,14 +799,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  const tabWorkNoticeEl = document.getElementById('tab-work-notice');
   if (tabWorkNoticeEl) {
     const hasFilters = regexFilters.length > 0;
     const anyOpenMatch =
       hasFilters && tabs.some((t) => tabMatchesFilters(t, regexFilters));
     if (hasFilters && !anyOpenMatch) {
       tabWorkNoticeEl.textContent =
-        'No matching tab — open your filtered page in Chrome; keep that tab open.';
+        'We only watch open tabs: each tab’s URL and title is checked against your filters, so the page must stay open for new activity to show up. No tab matches yet — open the site, then tap here for Filters (counts per rule, ↗ to open a URL).';
       tabWorkNoticeEl.classList.add('tab-work-notice--visible');
     } else {
       tabWorkNoticeEl.textContent = '';
@@ -671,16 +829,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   [addRegexButton, saveRegexButton, clearBadgeButton, summaryNotifyButton].forEach((button) => {
     if (!button) return;
-    button.style.transition = 'background-color 0.3s, transform 0.2s';
     button.style.cursor = 'pointer';
-    button.addEventListener('mouseenter', () => {
-      button.style.backgroundColor = '#d0d0d0';
-      button.style.transform = 'scale(1.02)';
-    });
-    button.addEventListener('mouseleave', () => {
-      button.style.backgroundColor = '';
-      button.style.transform = 'scale(1)';
-    });
   });
 
   regexFilters.forEach((rule) => {
@@ -690,7 +839,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const suggestionTitle = document.createElement('h4');
   suggestionTitle.textContent = 'Quick Suggestions:';
-  suggestionTitle.style.marginTop = '20px';
+  suggestionTitle.style.marginTop = '10px';
 
   const suggestionContainer = document.createElement('div');
   suggestionContainer.style = 'margin-top:5px; display: flex;flex-direction: column;align-items: flex-start';
@@ -734,7 +883,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     pattern.placeholder = 'Regex pattern';
     pattern.value = prefill.pattern;
     pattern.title = 'Padrão regex';
-    pattern.addEventListener('input', saveRegexRules);
+    pattern.addEventListener('input', () => {
+      saveRegexRules();
+      scheduleRefreshFilterTabStatus();
+    });
 
     const type = document.createElement('select');
     ['url', 'title'].forEach(opt => {
@@ -746,12 +898,89 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!prefill.editable) {
       type.disabled = true;
       pattern.disabled = true;
-      pattern.readonly = true;
+      pattern.readOnly = true;
     }
     type.classList.add('nodisplay');
     type.value = prefill.type;
     type.title = 'Tipo de regra';
-    type.addEventListener('change', saveRegexRules);
+    type.addEventListener('change', () => {
+      saveRegexRules();
+      scheduleRefreshFilterTabStatus();
+    });
+
+    const statusSpan = document.createElement('span');
+    statusSpan.className = 'regex-row-match-count';
+    statusSpan.setAttribute('aria-label', 'Open tabs matching this row');
+
+    const helpBtn = document.createElement('button');
+    helpBtn.type = 'button';
+    helpBtn.className = 'regex-help-open';
+    helpBtn.textContent = '\u2197';
+    helpBtn.title = 'Open in new tab — edit URL if needed, then confirm';
+    helpBtn.setAttribute('aria-label', 'Open tab from this filter (external link)');
+
+    const panel = document.createElement('div');
+    panel.className = 'regex-open-panel';
+
+    const panelLabel = document.createElement('label');
+    panelLabel.textContent = 'Open tab at this address (edit if needed, then Open tab)';
+
+    const urlInput = document.createElement('input');
+    urlInput.type = 'text';
+    urlInput.className = 'regex-open-url-input';
+    urlInput.spellcheck = false;
+    urlInput.autocomplete = 'off';
+
+    const actions = document.createElement('div');
+    actions.className = 'regex-open-tab-actions';
+
+    const okBtn = document.createElement('button');
+    okBtn.type = 'button';
+    okBtn.className = 'regex-open-tab-ok';
+    okBtn.textContent = 'Open tab';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'regex-open-tab-cancel';
+    cancelBtn.textContent = 'Cancel';
+
+    helpBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const wasOpen = panel.classList.contains('is-open');
+      closeAllRegexOpenPanels();
+      if (!wasOpen) {
+        urlInput.value = guessOpenUrlFromFilter(pattern.value, type.value);
+        panel.classList.add('is-open');
+        urlInput.focus();
+        urlInput.select();
+      }
+    });
+
+    cancelBtn.addEventListener('click', () => {
+      panel.classList.remove('is-open');
+    });
+
+    okBtn.addEventListener('click', () => {
+      let u = urlInput.value.trim();
+      if (!u) return;
+      if (!/^https?:\/\//i.test(u)) {
+        u = `https://${u}`;
+      }
+      try {
+        const parsed = new URL(u);
+        chrome.tabs.create({ url: parsed.href });
+        panel.classList.remove('is-open');
+      } catch {
+        window.alert('Please enter a valid http(s) URL.');
+      }
+    });
+
+    actions.appendChild(okBtn);
+    actions.appendChild(cancelBtn);
+    panel.appendChild(panelLabel);
+    panel.appendChild(urlInput);
+    panel.appendChild(actions);
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'remove-btn';
@@ -761,22 +990,28 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (prefill.onRemove) prefill.onRemove();
       container.remove();
       saveRegexRules();
+      scheduleRefreshFilterTabStatus();
     };
 
     container.appendChild(pattern);
     container.appendChild(type);
+    container.appendChild(statusSpan);
+    container.appendChild(helpBtn);
     container.appendChild(removeBtn);
+    container.appendChild(panel);
     regexList.appendChild(container);
   }
 
   createRegexRow();
 
+  refreshFilterTabStatus(tabs);
+
   async function saveRegexRules() {
-    const containers = regexList.querySelectorAll('div');
+    const containers = regexList.querySelectorAll('.regex-row');
     const newFilters = [];
     containers.forEach(c => {
-      const pattern = c.querySelector('input').value.trim();
-      const type = c.querySelector('select').value;
+      const pattern = c.querySelector('input[type="text"]')?.value.trim() ?? '';
+      const type = c.querySelector('select')?.value ?? 'url';
       if (pattern) {
         try {
           new RegExp(pattern);
@@ -787,6 +1022,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
     await chrome.storage.local.set({ [STORE_NAMES.REGEX_FILTERS]: newFilters});
+    refreshFilterTabStatus(await chrome.tabs.query({}));
     saveMessage.style.display = 'block';
     saveMessage.style.opacity = 1;
     saveMessage.style.transition = '';
@@ -803,6 +1039,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   addRegexButton.addEventListener('click', () => {
     createRegexRow();
+    scheduleRefreshFilterTabStatus();
   });
 
   clearBadgeButton.addEventListener('click', async () => {
