@@ -23,6 +23,11 @@
             --warn-bd: #fdd663;
             --radius: 6px;
             --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+            /* “0 tabs” + ↗ open-tab: same red system */
+            --filter-zero-fg: #c62828;
+            --filter-zero-chip-bg: #ffebee;
+            --filter-zero-chip-bd: #ffcdd2;
+            --filter-zero-chip-hover-bg: #ffcdd2;
         }
         [data-theme="dark"] {
             color-scheme: dark;
@@ -41,6 +46,10 @@
             --warn: #3d3420;
             --warn-fg: #fdd663;
             --warn-bd: #8a7030;
+            --filter-zero-fg: #ff8a80;
+            --filter-zero-chip-bg: #3d1818;
+            --filter-zero-chip-bd: #c62828;
+            --filter-zero-chip-hover-bg: #5c2222;
         }
 
         html {
@@ -205,7 +214,7 @@
         #notification-list li,
         #matched-list li {
             padding: 0;
-            margin-bottom: 4px;
+            margin-bottom: 6px;
             border-bottom: 1px solid var(--line);
         }
 
@@ -683,8 +692,11 @@
           counter-increment: li;
           content: counter(li) '. ';
           margin-left: -1.5em;
-          display: absolute;
-          width: 1.5em;
+          position: absolute;
+        }
+
+        .matched-item-line--title {
+            margin-left: 5px;
         }
 
         #tab-work-notice {
@@ -723,22 +735,42 @@
             max-width: 100%;
             box-sizing: border-box;
             font: inherit;
-            font-size: 10px;
-            line-height: 1.4;
+            line-height: 1.35;
             color: var(--warn-fg);
             margin: 0 0 4px 0;
-            padding: 4px 7px;
+            padding: 6px 8px;
             text-align: left;
-            text-decoration: underline;
-            text-underline-offset: 2px;
             background: var(--warn);
             border: 1px solid var(--warn-bd);
             border-radius: var(--radius);
             cursor: pointer;
+            align-items: flex-start;
         }
 
         #filter-partial-notice.filter-partial-notice--visible {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .filter-partial-notice__title {
             display: block;
+            font-size: 11px;
+            font-weight: 600;
+            margin: 0;
+            text-decoration: none;
+            color: inherit;
+        }
+
+        .filter-partial-notice__body {
+            display: block;
+            font-size: 10px;
+            font-weight: 400;
+            margin: 0;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+            color: inherit;
+            opacity: 0.95;
         }
 
         #filter-partial-notice:hover {
@@ -764,7 +796,7 @@
         }
 
         .regex-row-match-count.regex-row-match-count--zero {
-            color: #c62828;
+            color: var(--filter-zero-fg);
             font-weight: 700;
         }
 
@@ -785,6 +817,20 @@
 
         .regex-help-open:hover {
             background: var(--line);
+        }
+
+        /* Same red as .regex-row-match-count--zero (uses --filter-zero-*) */
+        .regex-help-open.regex-help-open--zero {
+            color: var(--filter-zero-fg);
+            font-weight: 700;
+            border-color: var(--filter-zero-chip-bd);
+            background: var(--filter-zero-chip-bg);
+        }
+
+        .regex-help-open.regex-help-open--zero:hover {
+            background: var(--filter-zero-chip-hover-bg);
+            border-color: var(--filter-zero-fg);
+            color: var(--filter-zero-fg);
         }
 
         .regex-open-panel {
@@ -890,7 +936,16 @@
 
 <div class="section notification active" role="region" aria-label="Notifications">
     <button type="button" id="tab-work-notice" aria-live="polite"></button>
-    <button type="button" id="filter-partial-notice" aria-live="polite"></button>
+    <button
+        type="button"
+        id="filter-partial-notice"
+        class="filter-partial-notice"
+        aria-live="polite"
+        aria-labelledby="filter-partial-title filter-partial-body"
+    >
+        <span id="filter-partial-title" class="filter-partial-notice__title"></span>
+        <span id="filter-partial-body" class="filter-partial-notice__body"></span>
+    </button>
     <div id="notification-area">
         <h3 id="notifications-title" style="display:none;" aria-live="polite">Unread Notifications</h3>
         <ul id="notification-list" role="list"></ul>

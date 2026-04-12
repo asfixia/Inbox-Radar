@@ -201,11 +201,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const inp = row.querySelector('input[type="text"]');
       const sel = row.querySelector('select');
       const badge = row.querySelector('.regex-row-match-count');
+      const helpOpen = row.querySelector('.regex-help-open');
       if (!inp || !sel || !badge) continue;
       const pattern = inp.value.trim();
       if (!pattern) {
         badge.textContent = '';
         badge.classList.remove('regex-row-match-count--zero');
+        helpOpen?.classList.remove('regex-help-open--zero');
         continue;
       }
       let valid = true;
@@ -217,6 +219,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!valid) {
         badge.textContent = 'invalid';
         badge.classList.remove('regex-row-match-count--zero');
+        helpOpen?.classList.remove('regex-help-open--zero');
         bits.push(`"${pattern.slice(0, 14)}…" (invalid)`);
         continue;
       }
@@ -224,6 +227,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const n = openTabs.filter((t) => tabMatchesSingleRule(t, rule)).length;
       badge.textContent = n === 0 ? '0 tabs' : `${n} tab${n === 1 ? '' : 's'}`;
       badge.classList.toggle('regex-row-match-count--zero', n === 0);
+      helpOpen?.classList.toggle('regex-help-open--zero', n === 0);
       const short = pattern.length > 18 ? `${pattern.slice(0, 18)}…` : pattern;
       bits.push(`${short} (${rule.type}): ${n}`);
     }
@@ -255,8 +259,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       rules.push({ pattern, type: sel.value });
     }
+    const titleEl = el.querySelector('.filter-partial-notice__title');
+    const bodyEl = el.querySelector('.filter-partial-notice__body');
+
     if (!rules.length) {
       el.classList.remove('filter-partial-notice--visible');
+      if (titleEl) titleEl.textContent = '';
+      if (bodyEl) bodyEl.textContent = '';
       return;
     }
     const anyMatch = openTabs.some((t) => tabMatchesFilters(t, rules));
@@ -264,11 +273,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       (rule) => openTabs.filter((t) => tabMatchesSingleRule(t, rule)).length === 0
     );
     if (anyMatch && someZero) {
-      el.textContent =
-        'Some filters match no open tab yet, open at least one to start monitoring. Can open by tab here and click on Filters "↗" button.';
+      if (titleEl) {
+        titleEl.textContent = 'Some filters have no open matching tabs.';
+      }
+      if (bodyEl) {
+        bodyEl.textContent = 'Open a tab to enable notifications (use ↗ in Filters).';
+      }
       el.classList.add('filter-partial-notice--visible');
     } else {
       el.classList.remove('filter-partial-notice--visible');
+      if (titleEl) titleEl.textContent = '';
+      if (bodyEl) bodyEl.textContent = '';
     }
   }
 
