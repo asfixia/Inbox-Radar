@@ -18,6 +18,8 @@ let timeoutId = null;
 
 /** Single list notification for all unread hosts (replaces per-host basic toasts). */
 const DIGEST_NOTIFICATION_ID = 'inboxradar-unread-digest';
+/** Fingerprint of last successfully shown digest; avoids clear+create on every updateBadge. */
+let lastDigestNotificationSignature = '';
 let lastExtensionChimeAt = 0;
 /** Minimum time between any two notification chimes (cross-site). */
 const CHIME_GLOBAL_COOLDOWN_MS = 4500;
@@ -638,6 +640,16 @@ async function notificationsCreateTracked(id, options, tryRelaxedOnFail) {
 }
 
 /**
+ * Stable string for digest list content + persistence flag (used to skip redundant creates).
+ * @param {chrome.notifications.NotificationCreateOptions} listBase
+ * @param {boolean} persistent
+ */
+function digestNotificationSignature(listBase, persistent) {
+  const parts = (listBase.items || []).map((i) => `${i.title}\u001f${i.message || ''}`);
+  return `${persistent ? 1 : 0}:${parts.join('|')}`;
+}
+
+/**
  * One deduplicated list notification; OS toast is silent (optional extension chime).
  * @param {Record<string, { since: number, tabIds: number[] }>} notifiedByHost
  * @param {string} mode
@@ -646,26 +658,36 @@ async function notificationsCreateTracked(id, options, tryRelaxedOnFail) {
 async function syncUnreadDigestNotificationFromState(notifiedByHost, mode, prefs) {
   const hosts = Object.keys(notifiedByHost);
   if (hosts.length === 0 || !modeIncludesDigest(mode)) {
+    lastDigestNotificationSignature = '';
     await clearDigestNotification();
     return;
   }
   const listBase = await buildDigestListOptions(notifiedByHost);
   if (!listBase) {
+    lastDigestNotificationSignature = '';
     await clearDigestNotification();
+    return;
+  }
+  const persistent = prefs.desktopPersistent !== false;
+  const sig = digestNotificationSignature(listBase, persistent);
+  if (sig === lastDigestNotificationSignature) {
     return;
   }
   const options = {
     ...listBase,
     silent: true,
-    ...(prefs.desktopPersistent ? { requireInteraction: true } : {}),
+    ...(persistent ? { requireInteraction: true } : {}),
   };
   const r = await notificationsCreateTracked(DIGEST_NOTIFICATION_ID, options, true);
-  if (!r.ok) {
+  if (r.ok) {
+    lastDigestNotificationSignature = sig;
+  } else {
     console.warn('Digest notification:', r.error);
   }
 }
 
 async function showDesktopSummaryNotification() {
+  lastDigestNotificationSignature = '';
   const notifiedByHost = await getNotifiedByHost();
   const mode = await getNotificationMode();
   const prefs = await getWarningPrefs();
