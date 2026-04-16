@@ -196,6 +196,10 @@
         .section {
             display: none;
             margin-top: 6px;
+            max-height: min(420px, calc(100vh - 52px));
+            overflow-x: hidden;
+            overflow-y: auto;
+            scrollbar-gutter: stable;
         }
 
         .section.active {
@@ -1021,8 +1025,13 @@
         </div>
         <div class="help-panel" id="help-sound">
             Plays when a background tab matches your filters. The digest toast stays silent. Chrome 109+.
+            Use “When to beep” for every matching update, or only when your unread list goes from empty to having at least one site (after you clear the list by visiting those tabs).
         </div>
         <div class="adv-sub" id="sound-sub">
+            <label class="sub-line">When to beep <select id="chime-notify-mode" aria-label="When to play extension chime">
+                    <option value="every">Every matching update</option>
+                    <option value="first">Only when unread starts (0 sites → 1+)</option>
+                </select></label>
             <label>Tone <select id="chime-sound" aria-label="Chime tone">
                     <option value="soft">Soft</option>
                     <option value="bright">Bright</option>

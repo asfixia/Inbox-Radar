@@ -44,6 +44,7 @@ export const DEFAULT_WARNING_PREFS = {
   desktopPopup: false,
   desktopPersistent: true,
   desktopSound: true,
+  chimeNotifyMode: 'every',
   toolbarSummary: true,
   chimeSoundId: 'soft',
   chimeDurationMs: 500,

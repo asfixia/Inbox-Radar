@@ -19,6 +19,8 @@ let timeoutId = null;
 /** Single list notification for all unread hosts (replaces per-host basic toasts). */
 const DIGEST_NOTIFICATION_ID = 'inboxradar-unread-digest';
 let lastExtensionChimeAt = 0;
+/** Minimum time between any two notification chimes (cross-site). */
+const CHIME_GLOBAL_COOLDOWN_MS = 4500;
 
 /** Brief badge color pulse when new background activity updates the badge. */
 const BADGE_PULSE_HIGHLIGHT = '#ffeb3e';
@@ -26,6 +28,11 @@ let badgePulseTimeouts = [];
 let lastBadgePulseAt = 0;
 
 const TEST_NOTIFY_LIST_ID = 'inboxradar-test-list';
+
+/** Ignore duplicate tab updates (same title/favicon) on other tabs matching the same filter(s). */
+const FILTER_NOTIFY_DEDUPE_MS = 2500;
+/** @type Map<string, { sig: string, at: number }> */
+const lastNotifyByFilterKey = new Map();
 
 // --- small Chrome / Promise helpers ---
 
@@ -177,6 +184,7 @@ chrome.storage.onChanged.addListener((changes) => {
       pattern: new RegExp(r.pattern, 'i'),
       type: r.type,
     }));
+    updateBadge();
   }
   if (changes[STORE_NAMES.WARNING_PREFS] || changes[STORE_NAMES.NOTIFICATION_MODE]) {
     updateBadge();
@@ -191,32 +199,122 @@ function tabMatchesRegexRules(tab, title) {
   });
 }
 
+function tabMatchesSingleRegexRule(tab, rule) {
+  const haystack = rule.type === 'title' ? tab.title || '' : tab.url || '';
+  return rule.pattern.test(haystack);
+}
+
+/**
+ * Stable id per saved filter row (type + pattern + index).
+ * @param {chrome.tabs.Tab} tab
+ * @param {string} title
+ * @returns {string[]}
+ */
+function collectMatchingFilterKeys(tab, title) {
+  const keys = [];
+  const tabWithTitle = { ...tab, title };
+  for (let i = 0; i < regexRules.length; i++) {
+    const rule = regexRules[i];
+    if (tabMatchesSingleRegexRule(tabWithTitle, rule)) {
+      keys.push(`${rule.type}:${rule.pattern.source}:${i}`);
+    }
+  }
+  return keys;
+}
+
+function pruneFilterNotifyDedupe(now) {
+  for (const [k, v] of lastNotifyByFilterKey) {
+    if (now - v.at > 60000) lastNotifyByFilterKey.delete(k);
+  }
+}
+
+/**
+ * True when every matching filter was notified with the same signature recently (other tabs, same “message”).
+ * @param {string[]} filterKeys
+ * @param {string} sig
+ * @param {number} now
+ */
+function isDuplicateMultiTabNotification(filterKeys, sig, now) {
+  pruneFilterNotifyDedupe(now);
+  if (filterKeys.length === 0) return false;
+  for (const fk of filterKeys) {
+    const prev = lastNotifyByFilterKey.get(fk);
+    if (!prev || prev.sig !== sig || now - prev.at >= FILTER_NOTIFY_DEDUPE_MS) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @param {string[]} filterKeys
+ * @param {string} sig
+ * @param {number} now
+ */
+function recordFilterNotification(filterKeys, sig, now) {
+  for (const fk of filterKeys) {
+    lastNotifyByFilterKey.set(fk, { sig, at: now });
+  }
+}
+
+/**
+ * True if some window is focused and its active tab is already on this host (user is “in” this site).
+ * Avoids chimes when another background tab on the same host updates.
+ * @param {string} host
+ */
+async function isUserViewingHostnameInFocusedWindow(host) {
+  const activeTabs = await chrome.tabs.query({ active: true });
+  for (const t of activeTabs) {
+    if (safeHostnameFromTabUrl(t.url) !== host) continue;
+    try {
+      const w = await chrome.windows.get(t.windowId);
+      if (w.focused) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
+async function countUnmonitoredFilters() {
+  if (!Array.isArray(regexRules) || regexRules.length === 0) return 0;
+  const tabs = await chrome.tabs.query({});
+  let missing = 0;
+  for (const rule of regexRules) {
+    const hasMatch = tabs.some((tab) => tabMatchesSingleRegexRule(tab, rule));
+    if (!hasMatch) missing += 1;
+  }
+  return missing;
+}
+
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!changeInfo.title && !tab.url && !changeInfo.favIconUrl) return;
 
-  const newFavicon = changeInfo.favIconUrl || tab.favIconUrl;
-  const lastFavicon = lastFavicons[tabId] || newFavicon;
   const newTitle = changeInfo.title || tab.title;
-  const lastTitle = lastTitles[tabId];
+  const newFavicon = changeInfo.favIconUrl || tab.favIconUrl;
   lastTitles[tabId] = newTitle;
   lastFavicons[tabId] = newFavicon;
 
-  if (newTitle !== lastTitle || newFavicon !== lastFavicon) return;
-
   try {
-    const [tabInfo, windowInfo] = await Promise.all([
-      chrome.tabs.get(tabId),
-      chrome.windows.getLastFocused({ populate: false }),
-    ]);
+    const tabInfo = await chrome.tabs.get(tabId);
+    let tabWindow;
+    try {
+      tabWindow = await chrome.windows.get(tabInfo.windowId);
+    } catch {
+      return;
+    }
 
-    if (tabInfo.active && tabInfo.windowId === windowInfo.id && windowInfo.focused) return;
+    // Aba já visível e janela focada: não é notificação em segundo plano (getLastFocused falha com várias janelas).
+    if (tabInfo.active && tabWindow.focused) return;
 
-    if (!tabMatchesRegexRules(tab, newTitle)) return;
+    if (!tabMatchesRegexRules(tabInfo, newTitle)) return;
 
-    const host = safeHostnameFromTabUrl(tab.url);
+    const host = safeHostnameFromTabUrl(tabInfo.url);
     if (!host) return;
 
     const notifiedByHost = await getNotifiedByHost();
+    /** `first` chime mode: beep only on transition from no unread sites → at least one (not once per host). */
+    const wasGloballyClear = Object.keys(notifiedByHost).length === 0;
     const prevEntry = notifiedByHost[host];
     const tabIds = new Set(prevEntry?.tabIds || []);
     tabIds.add(tabId);
@@ -226,12 +324,34 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       tabIds: Array.from(tabIds),
     };
 
-    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
-    await updateBadge(notifiedByHost, { pulse: true });
+    const filterKeys = collectMatchingFilterKeys(tabInfo, newTitle);
+    const sig = `${host}\0${newTitle}\0${newFavicon || ''}`;
+    const now = Date.now();
+    const suppressUserAlert = isDuplicateMultiTabNotification(filterKeys, sig, now);
 
-    const prefs = await getWarningPrefs();
-    if (prefs.desktopSound) {
-      await maybePlayExtensionChime();
+    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
+
+    if (!suppressUserAlert) {
+      recordFilterNotification(filterKeys, sig, now);
+    }
+
+    const userViewingHost = suppressUserAlert
+      ? false
+      : await isUserViewingHostnameInFocusedWindow(host);
+    const suppressAttention = suppressUserAlert || userViewingHost;
+
+    if (!suppressAttention) {
+      await updateBadge(notifiedByHost, { pulse: true });
+      const prefs = await getWarningPrefs();
+      if (prefs.desktopSound) {
+        const chimeEvery = prefs.chimeNotifyMode !== 'first';
+        if (chimeEvery || wasGloballyClear) {
+          await maybePlayExtensionChime();
+        }
+      }
+    } else {
+      // Still sync digest + toolbar title with `notifiedByHost`; only chime and badge pulse are suppressed.
+      await updateBadge(notifiedByHost, { pulse: false });
     }
   } catch (error) {
     console.warn(`Error processing tab update ${tabId}:`, error);
@@ -260,10 +380,16 @@ function setActionTitleDefault() {
  * Native toolbar tooltip (hover) with unread sites and short tab titles.
  * @param {Record<string, { since: number, tabIds: number[] }>} notifiedByHost
  */
-async function refreshUnreadActionTitle(notifiedByHost) {
+async function refreshUnreadActionTitle(notifiedByHost, unmonitoredFiltersCount = 0) {
   const hosts = Object.keys(notifiedByHost);
   if (hosts.length === 0) {
-    setActionTitleDefault();
+    if (unmonitoredFiltersCount > 0) {
+      chrome.action.setTitle({
+        title: `${getDefaultActionTitle()} · Warning: ${unmonitoredFiltersCount} filter(s) have no open matching tab.`,
+      });
+    } else {
+      setActionTitleDefault();
+    }
     return;
   }
 
@@ -285,16 +411,22 @@ async function refreshUnreadActionTitle(notifiedByHost) {
 
   let title = `Unread · ${segments.join(' | ')}`;
   if (hosts.length > 3) title += ` · +${hosts.length - 3} more`;
+  if (unmonitoredFiltersCount > 0) {
+    title += ` · Warning: ${unmonitoredFiltersCount} filter(s) not monitored`;
+  }
   if (title.length > 130) title = `${title.slice(0, 127)}…`;
   chrome.action.setTitle({ title });
 }
 
+/**
+ * Throttles real notification chimes. Tests call {@link playExtensionChime} directly.
+ */
 async function maybePlayExtensionChime() {
   const now = Date.now();
-  if (now - lastExtensionChimeAt < 2500) return;
-  lastExtensionChimeAt = now;
+  if (now - lastExtensionChimeAt < CHIME_GLOBAL_COOLDOWN_MS) return;
   try {
     await playExtensionChime();
+    lastExtensionChimeAt = Date.now();
   } catch (e) {
     console.warn('Extension chime:', e);
   }
@@ -843,14 +975,22 @@ async function updateBadge(notifiedByHost, options = {}) {
   notifiedByHost = notifiedByHost || (await getNotifiedByHost());
   const prefs = await getWarningPrefs();
   const mode = await getNotificationMode();
+  const unmonitoredFiltersCount = await countUnmonitoredFilters();
+  const hasUnmonitoredFilters = unmonitoredFiltersCount > 0;
+  const warningBadgeColor = '#C2410C';
 
   const badgeAllowed = modeIncludesBadge(mode);
   const hosts = Object.keys(notifiedByHost);
   const wantPulse = options.pulse === true;
 
   if (hosts.length === 0) {
-    chrome.action.setBadgeText({ text: '' });
-    setActionTitleDefault();
+    if (!badgeAllowed || !hasUnmonitoredFilters) {
+      chrome.action.setBadgeText({ text: '' });
+    } else {
+      chrome.action.setBadgeText({ text: '!' });
+      chrome.action.setBadgeBackgroundColor({ color: warningBadgeColor });
+    }
+    await refreshUnreadActionTitle(notifiedByHost, unmonitoredFiltersCount);
     await syncUnreadDigestNotificationFromState(notifiedByHost, mode, prefs);
     return;
   }
@@ -870,14 +1010,18 @@ async function updateBadge(notifiedByHost, options = {}) {
     const selectedColor =
       [...scheme].reverse().find((s) => s.threshold <= messageMinutes)?.color || 'red';
 
-    chrome.action.setBadgeText({ text: timeAsHuman });
+    let badgeText = timeAsHuman;
+    if (hasUnmonitoredFilters) {
+      badgeText = timeAsHuman.length <= 3 ? `${timeAsHuman}!` : '!';
+    }
+    chrome.action.setBadgeText({ text: badgeText });
     chrome.action.setBadgeBackgroundColor({ color: selectedColor });
     if (wantPulse) {
       maybePulseBadgeForAttention(selectedColor);
     }
   }
 
-  await refreshUnreadActionTitle(notifiedByHost);
+  await refreshUnreadActionTitle(notifiedByHost, unmonitoredFiltersCount);
   await syncUnreadDigestNotificationFromState(notifiedByHost, mode, prefs);
 }
 
@@ -898,11 +1042,15 @@ async function getWarningPrefs() {
   const vol = parseFloat(raw.chimeVolume);
   const chimeVolume =
     Number.isFinite(vol) && vol >= 0.05 && vol <= 1 ? vol : 0.85;
+  const modeRaw = raw.chimeNotifyMode;
+  const chimeNotifyMode =
+    modeRaw === 'first' || modeRaw === 'every' ? modeRaw : 'every';
   return {
     badge: true,
     desktopPopup: false,
     desktopPersistent: raw.desktopPersistent !== false,
     desktopSound: raw.desktopSound !== false,
+    chimeNotifyMode,
     toolbarSummary: true,
     chimeSoundId: soundId,
     chimeDurationMs,

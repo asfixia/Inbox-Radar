@@ -105,14 +105,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   const tabWorkNoticeEl = document.getElementById('tab-work-notice');
   const filterPartialNoticeEl = document.getElementById('filter-partial-notice');
 
-  async function initPopupTheme() {
-    const r = await chrome.storage.local.get(STORE_NAMES.POPUP_THEME);
-    const dark = r[STORE_NAMES.POPUP_THEME] === 'dark';
+  function applyPopupThemeFromStorageValue(themeVal) {
+    const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches === true;
+    const dark = themeVal === 'dark' || (themeVal !== 'light' && prefersDark);
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     const chk = document.getElementById('popup-theme-dark');
     if (chk) chk.checked = dark;
   }
-  await initPopupTheme();
+
   document.getElementById('popup-theme-dark')?.addEventListener('change', async (e) => {
     const on = /** @type {HTMLInputElement} */ (e.target).checked;
     document.documentElement.dataset.theme = on ? 'dark' : 'light';
@@ -420,7 +420,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('show-notification').addEventListener('click', async () => {
     activateOneTabOnly('notification');
-    updateFilterPartialNoticeBar(await chrome.tabs.query({}));
+    const openTabs = await chrome.tabs.query({});
+    updateFilterPartialNoticeBar(openTabs);
   });
 
   document.getElementById('show-filters').addEventListener('click', async () => {
@@ -453,6 +454,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const soundSubEl = document.getElementById('sound-sub');
   const warnPersistentEl = document.getElementById('warn-persistent');
   const warnSoundEl = document.getElementById('warn-sound');
+  const chimeNotifyModeEl = document.getElementById('chime-notify-mode');
   const chimeSoundEl = document.getElementById('chime-sound');
   const chimeDurationEl = document.getElementById('chime-duration');
   const chimeDurationValEl = document.getElementById('chime-duration-val');
@@ -519,6 +521,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const on = !!warnSoundEl?.checked;
     if (soundSubEl) soundSubEl.classList.toggle('is-muted', !on);
     const dis = !on;
+    if (chimeNotifyModeEl) chimeNotifyModeEl.disabled = dis;
     if (chimeSoundEl) chimeSoundEl.disabled = dis;
     if (chimeDurationEl) chimeDurationEl.disabled = dis;
     if (chimeVolumeEl) chimeVolumeEl.disabled = dis;
@@ -558,11 +561,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       Number.isFinite(volPct) && volPct >= 5 && volPct <= 100
         ? volPct / 100
         : 0.85;
+    const chimeNotifyMode =
+      chimeNotifyModeEl?.value === 'first' ? 'first' : 'every';
     return {
       badge: true,
       desktopPopup: false,
       desktopPersistent: !!warnPersistentEl?.checked,
       desktopSound: !!warnSoundEl?.checked,
+      chimeNotifyMode,
       toolbarSummary: true,
       chimeSoundId,
       chimeDurationMs,
@@ -584,7 +590,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  [warnPersistentEl, chimeSoundEl].forEach((el) => {
+  [warnPersistentEl, chimeNotifyModeEl, chimeSoundEl].forEach((el) => {
     if (el) el.addEventListener('change', saveWarningPrefs);
   });
   [chimeDurationEl, chimeVolumeEl].forEach((el) => {
@@ -669,13 +675,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  const stored = await chrome.storage.local.get([
-    STORE_NAMES.REGEX_FILTERS,
-    STORE_NAMES.NOTIFIED_BY_HOST,
-    STORE_NAMES.NOTIFICATION_MODE,
-    STORE_NAMES.WARNING_PREFS,
+  const [stored, tabs] = await Promise.all([
+    chrome.storage.local.get([
+      STORE_NAMES.POPUP_THEME,
+      STORE_NAMES.REGEX_FILTERS,
+      STORE_NAMES.NOTIFIED_BY_HOST,
+      STORE_NAMES.NOTIFICATION_MODE,
+      STORE_NAMES.WARNING_PREFS,
+      STORE_NAMES.BADGE_COLOR_SCHEME,
+    ]),
+    chrome.tabs.query({}),
   ]);
+
+  applyPopupThemeFromStorageValue(stored[STORE_NAMES.POPUP_THEME]);
+
   const regexFilters = stored[STORE_NAMES.REGEX_FILTERS] || [];
+  /** Kept in sync for storage listener + re-renders */
+  let cachedRegexFilters = regexFilters;
   const notifiedByHost = stored[STORE_NAMES.NOTIFIED_BY_HOST] || {};
   const rawStoredMode = stored[STORE_NAMES.NOTIFICATION_MODE];
   const notificationMode =
@@ -689,6 +705,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   warnPersistentEl.checked = warningPrefs.desktopPersistent !== false;
   warnSoundEl.checked = warningPrefs.desktopSound !== false;
+  if (chimeNotifyModeEl) {
+    chimeNotifyModeEl.value =
+      warningPrefs.chimeNotifyMode === 'first' ? 'first' : 'every';
+  }
   if (chimeSoundEl) {
     const sid = CHIME_SOUND_IDS.includes(warningPrefs.chimeSoundId)
       ? warningPrefs.chimeSoundId
@@ -720,13 +740,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   prevSoundChecked = !!warnSoundEl?.checked;
   syncAdvTestStripIconButtons();
 
-  notificationList.innerHTML = '';
-  matchedList.innerHTML = '';
-
-  const tabs = await chrome.tabs.query({});
-  let foundNotification = false;
-  let foundMatch = false;
-
   function highlightRegexMatches(text, regexPattern) {
     try {
       const regex = new RegExp(regexPattern, 'gi');
@@ -737,110 +750,139 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  const notifiedTabIdSet = new Set();
-  Object.values(notifiedByHost).forEach((entry) => {
-    (entry.tabIds || []).forEach((id) => notifiedTabIdSet.add(id));
-  });
-
   function pickBestTab(tabObjs) {
     if (!tabObjs.length) return null;
     return [...tabObjs].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
   }
 
-  let matchedTabsQuantity = 0;
-  const now = Date.now();
+  /**
+   * Refresh unread + matched lists when storage/tabs change without rebuilding Filters UI.
+   * @param {Record<string, { since: number, tabIds: number[] }>} notifiedByHostMap
+   * @param {Array<{ pattern: string, type: string }>} regexFiltersForMatch
+   * @param {chrome.tabs.Tab[]} openTabs
+   */
+  function renderUnreadAndMatchedViews(notifiedByHostMap, regexFiltersForMatch, openTabs) {
+    notificationList.replaceChildren();
+    matchedList.replaceChildren();
 
-  for (const host of Object.keys(notifiedByHost)) {
-    const entry = notifiedByHost[host];
-    const tabObjs = (entry.tabIds || [])
-      .map((id) => tabs.find((t) => t.id === id))
-      .filter(Boolean);
-    const best = pickBestTab(tabObjs);
-    const sampleTab = best || tabObjs[0];
-    if (!sampleTab) continue;
-
-    const matchedFilters = regexFilters.filter((rule) => {
-      const regex = new RegExp(rule.pattern, 'i');
-      if (rule.type === 'url') return regex.test(sampleTab.url);
-      if (rule.type === 'title') return regex.test(sampleTab.title);
-      return false;
-    });
-    const matchesSomeFilter = matchedFilters.length > 0 ? matchedFilters[0] : { pattern: '.*' };
-
-    const notificationItem = document.createElement('li');
-    const favicon = faviconImgHtml(sampleTab);
-    const tabCount = tabObjs.length;
-    const tabNote = tabCount > 1 ? ` <small>(${tabCount} tabs)</small>` : '';
-    notificationItem.innerHTML = `<div class="notification-item-stack"><div class="notification-item-line--host">${favicon} <span class="match-highlight-title">${host}</span>${tabNote}</div><div class="notification-item-line--meta"><span>${sampleTab.title || '(no title)'}</span> (<i>${UTILS.getTimeAsHuman(now - entry.since)}</i>)</div><div class="notification-item-line--url"><small>${highlightRegexMatches(sampleTab.url, matchesSomeFilter.pattern)}</small></div></div>`;
-    notificationItem.style.cursor = 'pointer';
-    notificationItem.tabIndex = 0;
-    notificationItem.onclick = () => {
-      if (!best) return;
-      chrome.tabs.update(best.id, { active: true });
-      chrome.windows.update(best.windowId, { focused: true });
-    };
-    notificationList.appendChild(notificationItem);
-    foundNotification = true;
-  }
-
-  tabs.forEach((tab) => {
-    const matchedFilters = regexFilters.filter((rule) => {
-      const regex = new RegExp(rule.pattern, 'i');
-      if (rule.type === 'url') return regex.test(tab.url);
-      if (rule.type === 'title') return regex.test(tab.title);
-      return false;
+    const notifiedTabIdSet = new Set();
+    Object.values(notifiedByHostMap).forEach((entry) => {
+      (entry.tabIds || []).forEach((id) => notifiedTabIdSet.add(id));
     });
 
-    const matchesSomeFilter = matchedFilters.length > 0 ? matchedFilters[0] : null;
-    const isNotified = notifiedTabIdSet.has(tab.id);
+    let foundNotification = false;
+    let foundMatch = false;
+    let matchedTabsQuantity = 0;
+    const now = Date.now();
 
-    if (!isNotified && !matchesSomeFilter) return;
+    for (const host of Object.keys(notifiedByHostMap)) {
+      const entry = notifiedByHostMap[host];
+      const tabObjs = (entry.tabIds || [])
+        .map((id) => openTabs.find((t) => t.id === id))
+        .filter(Boolean);
+      const best = pickBestTab(tabObjs);
+      const sampleTab = best || tabObjs[0];
+      if (!sampleTab) continue;
 
-    matchedTabsQuantity++;
+      const matchedFilters = regexFiltersForMatch.filter((rule) => {
+        const regex = new RegExp(rule.pattern, 'i');
+        if (rule.type === 'url') return regex.test(sampleTab.url);
+        if (rule.type === 'title') return regex.test(sampleTab.title);
+        return false;
+      });
+      const matchesSomeFilter = matchedFilters.length > 0 ? matchedFilters[0] : { pattern: '.*' };
 
-    if (!isNotified && matchesSomeFilter) {
-      const matchedItem = document.createElement('li');
-      const favicon = faviconImgHtml(tab);
-      matchedItem.innerHTML = `<div class="matched-item-stack"><div class="matched-item-line--title">${favicon} ${tab.title}</div><div class="matched-item-line--url"><small>${highlightRegexMatches(tab.url, matchesSomeFilter.pattern)}</small></div></div>`;
-      matchedItem.style.opacity = 0.8;
-      matchedItem.style.cursor = 'pointer';
-      matchedItem.tabIndex = 0;
-      matchedItem.onclick = () => {
-        chrome.tabs.update(tab.id, { active: true });
-        chrome.windows.update(tab.windowId, { focused: true });
+      const notificationItem = document.createElement('li');
+      const favicon = faviconImgHtml(sampleTab);
+      const tabCount = tabObjs.length;
+      const tabNote = tabCount > 1 ? ` <small>(${tabCount} tabs)</small>` : '';
+      notificationItem.innerHTML = `<div class="notification-item-stack"><div class="notification-item-line--host">${favicon} <span class="match-highlight-title">${host}</span>${tabNote}</div><div class="notification-item-line--meta"><span>${sampleTab.title || '(no title)'}</span> (<i>${UTILS.getTimeAsHuman(now - entry.since)}</i>)</div><div class="notification-item-line--url"><small>${highlightRegexMatches(sampleTab.url, matchesSomeFilter.pattern)}</small></div></div>`;
+      notificationItem.style.cursor = 'pointer';
+      notificationItem.tabIndex = 0;
+      notificationItem.onclick = () => {
+        if (!best) return;
+        chrome.tabs.update(best.id, { active: true });
+        chrome.windows.update(best.windowId, { focused: true });
       };
-      matchedList.appendChild(matchedItem);
-      foundMatch = true;
+      notificationList.appendChild(notificationItem);
+      foundNotification = true;
     }
-  });
 
-  if (tabWorkNoticeEl) {
-    const hasFilters = regexFilters.length > 0;
-    const anyOpenMatch =
-      hasFilters && tabs.some((t) => tabMatchesFilters(t, regexFilters));
-    if (hasFilters && !anyOpenMatch) {
-      tabWorkNoticeEl.textContent =
-        'We only watch open tabs: each tab’s URL and title is checked against your filters, so the page must stay open for new activity to show up. No tab matches yet — open the site, then tap here for Filters (counts per rule, ↗ to open a URL).';
-      tabWorkNoticeEl.classList.add('tab-work-notice--visible');
-    } else {
-      tabWorkNoticeEl.textContent = '';
-      tabWorkNoticeEl.classList.remove('tab-work-notice--visible');
+    openTabs.forEach((tab) => {
+      const matchedFilters = regexFiltersForMatch.filter((rule) => {
+        const regex = new RegExp(rule.pattern, 'i');
+        if (rule.type === 'url') return regex.test(tab.url);
+        if (rule.type === 'title') return regex.test(tab.title);
+        return false;
+      });
+
+      const matchesSomeFilter = matchedFilters.length > 0 ? matchedFilters[0] : null;
+      const isNotified = notifiedTabIdSet.has(tab.id);
+
+      if (!isNotified && !matchesSomeFilter) return;
+
+      matchedTabsQuantity++;
+
+      if (!isNotified && matchesSomeFilter) {
+        const matchedItem = document.createElement('li');
+        const favicon = faviconImgHtml(tab);
+        matchedItem.innerHTML = `<div class="matched-item-stack"><div class="matched-item-line--title">${favicon} ${tab.title}</div><div class="matched-item-line--url"><small>${highlightRegexMatches(tab.url, matchesSomeFilter.pattern)}</small></div></div>`;
+        matchedItem.style.opacity = 0.8;
+        matchedItem.style.cursor = 'pointer';
+        matchedItem.tabIndex = 0;
+        matchedItem.onclick = () => {
+          chrome.tabs.update(tab.id, { active: true });
+          chrome.windows.update(tab.windowId, { focused: true });
+        };
+        matchedList.appendChild(matchedItem);
+        foundMatch = true;
+      }
+    });
+
+    if (tabWorkNoticeEl) {
+      const hasFilters = regexFiltersForMatch.length > 0;
+      const anyOpenMatch =
+        hasFilters && openTabs.some((t) => tabMatchesFilters(t, regexFiltersForMatch));
+      if (hasFilters && !anyOpenMatch) {
+        tabWorkNoticeEl.textContent =
+          'We only watch open tabs: each tab’s URL and title is checked against your filters, so the page must stay open for new activity to show up. No tab matches yet — open the site, then tap here for Filters (counts per rule, ↗ to open a URL).';
+        tabWorkNoticeEl.classList.add('tab-work-notice--visible');
+      } else {
+        tabWorkNoticeEl.textContent = '';
+        tabWorkNoticeEl.classList.remove('tab-work-notice--visible');
+      }
     }
+
+    const mtq = document.getElementById('matched-title-quantity');
+    if (mtq) mtq.textContent = ` (${matchedTabsQuantity})`;
+
+    const hasOpenTabMatchingFilters =
+      regexFiltersForMatch.length > 0 &&
+      openTabs.some((t) => tabMatchesFilters(t, regexFiltersForMatch));
+
+    notificationsTitle.style.display = foundNotification ? 'block' : 'none';
+    noNotifications.style.display =
+      foundNotification || hasOpenTabMatchingFilters ? 'none' : 'block';
+    clearBadgeButton.style.display = foundNotification ? 'inline-block' : 'none';
+    syncSummaryNotificationButton();
+
+    if (matchedTitle) {
+      matchedTitle.style.display = foundMatch ? 'block' : 'none';
+    }
+    noMatched.style.display = foundMatch ? 'none' : 'block';
   }
 
-  document.getElementById('matched-title-quantity').innerHTML = ` (${matchedTabsQuantity})`;
+  renderUnreadAndMatchedViews(notifiedByHost, cachedRegexFilters, tabs);
 
-  const hasOpenTabMatchingFilters =
-    regexFilters.length > 0 && tabs.some((t) => tabMatchesFilters(t, regexFilters));
-
-  notificationsTitle.style.display = foundNotification ? 'block' : 'none';
-  noNotifications.style.display =
-    foundNotification || hasOpenTabMatchingFilters ? 'none' : 'block';
-  clearBadgeButton.style.display = foundNotification ? 'inline-block' : 'none';
-  syncSummaryNotificationButton();
-
-  matchedTitle.style.display = foundMatch ? 'block' : 'none';
-  noMatched.style.display = foundMatch ? 'none' : 'block';
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes[STORE_NAMES.NOTIFIED_BY_HOST]) return;
+    const raw = changes[STORE_NAMES.NOTIFIED_BY_HOST].newValue;
+    const next = raw && typeof raw === 'object' ? raw : {};
+    chrome.tabs.query({}, (openTabs) => {
+      renderUnreadAndMatchedViews(next, cachedRegexFilters, openTabs);
+      updateFilterPartialNoticeBar(openTabs);
+    });
+  });
 
   [addRegexButton, saveRegexButton, clearBadgeButton, summaryNotifyButton].forEach((button) => {
     if (!button) return;
@@ -1036,8 +1078,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
     });
-    await chrome.storage.local.set({ [STORE_NAMES.REGEX_FILTERS]: newFilters});
-    refreshFilterTabStatus(await chrome.tabs.query({}));
+    await chrome.storage.local.set({ [STORE_NAMES.REGEX_FILTERS]: newFilters });
+    cachedRegexFilters = newFilters;
+    const nbStore = await chrome.storage.local.get(STORE_NAMES.NOTIFIED_BY_HOST);
+    const nb = nbStore[STORE_NAMES.NOTIFIED_BY_HOST] || {};
+    const tabsFresh = await chrome.tabs.query({});
+    renderUnreadAndMatchedViews(nb, newFilters, tabsFresh);
+    refreshFilterTabStatus(tabsFresh);
     saveMessage.style.display = 'block';
     saveMessage.style.opacity = 1;
     saveMessage.style.transition = '';
@@ -1060,14 +1107,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   clearBadgeButton.addEventListener('click', async () => {
     await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: {} });
     chrome.runtime.sendMessage({ action: MESSAGE_NAMES.UPDATE_BADGE_NOW });
-    notificationList.innerHTML = '';
-    notificationsTitle.style.display = 'none';
     const tabsAfter = await chrome.tabs.query({});
-    const stillHasMatchingOpenTab =
-      regexFilters.length > 0 && tabsAfter.some((t) => tabMatchesFilters(t, regexFilters));
-    noNotifications.style.display = stillHasMatchingOpenTab ? 'none' : 'block';
-    clearBadgeButton.style.display = 'none';
-    syncSummaryNotificationButton();
+    renderUnreadAndMatchedViews({}, cachedRegexFilters, tabsAfter);
     clearMessage.style.display = 'block';
     setTimeout(() => clearMessage.style.display = 'none', 2000);
   });
@@ -1077,8 +1118,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   const colorSchemaDiv = document.getElementById('badge-color-schema');
-  const storedScheme = await chrome.storage.local.get(STORE_NAMES.BADGE_COLOR_SCHEME);
-  const schemeList = storedScheme[STORE_NAMES.BADGE_COLOR_SCHEME];
+  const schemeList = stored[STORE_NAMES.BADGE_COLOR_SCHEME];
   const colorItems = [];
   if (Array.isArray(schemeList)) {
     schemeList.forEach((colorItem) => {
@@ -1117,7 +1157,22 @@ function debounce(func, delay) {
   };
 }
 
+/** Preserve vertical scroll per section when switching tabs (Chrome popup). */
+const sectionScrollTop = { notification: 0, filters: 0, advanced: 0 };
+
+function sectionKeyFromActivePanel() {
+  const el = document.querySelector('div.section.active');
+  if (!el) return 'notification';
+  if (el.classList.contains('notification')) return 'notification';
+  if (el.classList.contains('filters')) return 'filters';
+  return 'advanced';
+}
+
 function activateOneTabOnly(tabName) {
+  const from = sectionKeyFromActivePanel();
+  const prevSection = document.querySelector(`div.section.${from}`);
+  if (prevSection) sectionScrollTop[from] = prevSection.scrollTop;
+
   Array.from(document.querySelectorAll('button.tab.active')).forEach((button) => {
     button.classList.remove('active');
   });
@@ -1127,5 +1182,11 @@ function activateOneTabOnly(tabName) {
   });
 
   document.querySelector('button.tab.' + tabName).classList.add('active');
-  document.querySelector('div.section.' + tabName).classList.add('active');
+  const nextSection = document.querySelector('div.section.' + tabName);
+  if (nextSection) {
+    nextSection.classList.add('active');
+    requestAnimationFrame(() => {
+      nextSection.scrollTop = sectionScrollTop[tabName] || 0;
+    });
+  }
 }
