@@ -21,6 +21,9 @@ const DIGEST_NOTIFICATION_ID = 'inboxradar-unread-digest';
 let lastExtensionChimeAt = 0;
 /** Minimum time between any two notification chimes (cross-site). */
 const CHIME_GLOBAL_COOLDOWN_MS = 4500;
+const ACTION_DEFAULT_ICON_PATH = 'icons/icon128.png';
+const ACTION_WARNING_ICON_PATH = 'icons/icon128.png';
+let actionWarningIconActive = false;
 
 /** Brief badge color pulse when new background activity updates the badge. */
 const BADGE_PULSE_HIGHLIGHT = '#ffeb3e';
@@ -120,6 +123,18 @@ function maybePulseBadgeForAttention(finalColor) {
   if (now - lastBadgePulseAt < 1800) return;
   lastBadgePulseAt = now;
   pulseBadgeBackground(finalColor);
+}
+
+/**
+ * Switches the toolbar icon to warning mode when some filters have no matching open tabs.
+ * @param {boolean} active
+ */
+function syncActionWarningIcon(active) {
+  if (actionWarningIconActive === active) return;
+  actionWarningIconActive = active;
+  chrome.action.setIcon({
+    path: active ? ACTION_WARNING_ICON_PATH : ACTION_DEFAULT_ICON_PATH,
+  });
 }
 
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -305,7 +320,11 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     }
 
     // Aba já visível e janela focada: não é notificação em segundo plano (getLastFocused falha com várias janelas).
-    if (tabInfo.active && tabWindow.focused) return;
+    // Still refresh badge/icon state because opening/loading this tab may satisfy a regex coverage gap.
+    if (tabInfo.active && tabWindow.focused) {
+      await updateBadge();
+      return;
+    }
 
     if (!tabMatchesRegexRules(tabInfo, newTitle)) return;
 
@@ -362,6 +381,11 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   delete lastTitles[tabId];
   delete lastFavicons[tabId];
   await handleTabClosed(tabId);
+});
+
+chrome.tabs.onCreated.addListener(async () => {
+  // Opening a new tab can satisfy a filter with zero matching tabs.
+  await updateBadge();
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
@@ -925,7 +949,12 @@ async function handleTabVisited(tabId) {
   if (!host) return;
 
   const notifiedByHost = await getNotifiedByHost();
-  if (!notifiedByHost[host]) return;
+  if (!notifiedByHost[host]) {
+    // Even without unread items on this host, activation can change
+    // "filters with no open tabs" state, so refresh toolbar icon/badge.
+    await updateBadge(notifiedByHost);
+    return;
+  }
 
   delete notifiedByHost[host];
   const tabById = await tabsByIdMap();
@@ -962,8 +991,10 @@ async function handleTabClosed(tabId) {
 
   if (changed) {
     await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
-    await updateBadge(notifiedByHost);
   }
+  // Closing a tab can also create a "no matching tab" filter state,
+  // even when unread host map did not change.
+  await updateBadge(notifiedByHost);
 }
 
 /**
@@ -977,6 +1008,7 @@ async function updateBadge(notifiedByHost, options = {}) {
   const mode = await getNotificationMode();
   const unmonitoredFiltersCount = await countUnmonitoredFilters();
   const hasUnmonitoredFilters = unmonitoredFiltersCount > 0;
+  syncActionWarningIcon(hasUnmonitoredFilters);
   const warningBadgeColor = '#C2410C';
 
   const badgeAllowed = modeIncludesBadge(mode);
