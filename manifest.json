@@ -1,7 +1,7 @@
 {
   "name": "All-in-One Message Notifications",
   "short_name": "All-in-One Message Notifier",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "manifest_version": 3,
   "description": "Improve your productivy, don't lose your focus. Monitor messages and notifications from multiple tabs in one place.",
   "author": "Danilo da Silveira Figueira",

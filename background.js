@@ -1,19 +1,14 @@
 import { DEFAULT_BADGE_COLORS, DEFAULT_SUGGESTIONS } from './suggestions.js';
-import {
-  CHIME_SOUND_FILES,
-  CHIME_SOUND_IDS,
-  DEFAULT_WARNING_PREFS,
-  getTimeAsHuman,
-  getTimeInMinutes,
-  MESSAGE_NAMES,
-  STORE_NAMES,
-  safeHostnameFromTabUrl,
-} from './utils.js';
+import * as UTILS from './utils.js';
 
 // === background.js ===
 let lastTitles = {};
 let lastFavicons = {};
+/** Last hostname for which this tab matched a filter; used to detect title-only churn vs first match on a host. */
+let lastMatchedHostByTab = {};
 let regexRules = [];
+/** Dedupe spurious repeated `windows.onFocusChanged` for the same active tab (clears unread and re-arms digest). */
+const lastFocusHandledByWindow = new Map();
 let timeoutId = null;
 
 /** Single list notification for all unread hosts (replaces per-host basic toasts). */
@@ -38,6 +33,10 @@ const TEST_NOTIFY_LIST_ID = 'inboxradar-test-list';
 const FILTER_NOTIFY_DEDUPE_MS = 2500;
 /** @type Map<string, { sig: string, at: number }> */
 const lastNotifyByFilterKey = new Map();
+
+// Note: "already-pending" state (tab already fired a full alert) is derived from persisted
+// notifiedByHost[host].tabIds rather than an in-memory Set, so it survives service-worker
+// restarts (Chrome MV3 workers are terminated after ~30 s of idleness).
 
 // --- small Chrome / Promise helpers ---
 
@@ -72,27 +71,13 @@ async function getNotificationsPermission() {
   }
 }
 
-function modeIncludesBadge(mode) {
-  return mode === 'badge' || mode === 'both';
-}
-
-function modeIncludesDigest(mode) {
-  return mode === 'popup' || mode === 'both';
-}
-
 /** @returns {('badge' | 'desktop_list' | 'chime')[]} */
 function channelsEnabledForCurrentSettings(mode, prefs) {
   const channels = /** @type {('badge' | 'desktop_list' | 'chime')[]} */ ([]);
-  if (modeIncludesBadge(mode)) channels.push('badge');
-  if (modeIncludesDigest(mode)) channels.push('desktop_list');
+  if (UTILS.notificationModeIncludesBadge(mode)) channels.push('badge');
+  if (UTILS.notificationModeIncludesDigest(mode)) channels.push('desktop_list');
   if (prefs.desktopSound) channels.push('chime');
   return channels;
-}
-
-function replyAsync(promise, sendResponse) {
-  promise
-    .then((result) => sendResponse(result))
-    .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
 }
 
 function clearBadgePulse() {
@@ -163,24 +148,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     return false;
   }
-  if (message.action === MESSAGE_NAMES.UPDATE_BADGE_NOW) {
+  if (message.action === UTILS.MESSAGE_NAMES.UPDATE_BADGE_NOW) {
     updateBadge();
     return;
   }
-  if (message.action === MESSAGE_NAMES.SHOW_DESKTOP_SUMMARY) {
+  if (message.action === UTILS.MESSAGE_NAMES.TOOL_UI_HOST_HEARTBEAT) {
+    const raw = message.hosts;
+    const hosts = Array.isArray(raw)
+      ? [...new Set(raw.filter((h) => typeof h === 'string' && h.length > 0))]
+      : [];
+    if (hosts.length === 0) {
+      clearExtensionToolUiSession().catch(() => {});
+    } else {
+      refreshExtensionToolUiSession(hosts).catch(() => {});
+    }
+    return;
+  }
+  if (message.action === UTILS.MESSAGE_NAMES.SHOW_DESKTOP_SUMMARY) {
     showDesktopSummaryNotification();
     return;
   }
-  if (message.action === MESSAGE_NAMES.TEST_ALL_ALERTS) {
-    replyAsync(runTestAllEnabledAlerts(), sendResponse);
+  if (message.action === UTILS.MESSAGE_NAMES.TEST_ALL_ALERTS) {
+    UTILS.forwardPromiseToSendResponse(runTestAllEnabledAlerts(), sendResponse);
     return true;
   }
-  if (message.action === MESSAGE_NAMES.TEST_NOTIFICATION_CHANNELS) {
+  if (message.action === UTILS.MESSAGE_NAMES.TEST_NOTIFICATION_CHANNELS) {
     const raw = message.channels;
     const channels = Array.isArray(raw)
       ? raw.filter((c) => c === 'badge' || c === 'desktop_list' || c === 'chime')
       : [];
-    replyAsync(runTestNotificationChannels(channels), sendResponse);
+    UTILS.forwardPromiseToSendResponse(runTestNotificationChannels(channels), sendResponse);
     return true;
   }
 });
@@ -191,6 +188,13 @@ chrome.windows.onFocusChanged.addListener(async function clearNotificationFromFo
   const tabs = await chrome.tabs.query({ active: true, windowId });
   const tab = tabs[0];
   if (!tab) return;
+
+  const now = Date.now();
+  const prev = lastFocusHandledByWindow.get(windowId);
+  if (prev && prev.tabId === tab.id && now - prev.at < 500) {
+    return;
+  }
+  lastFocusHandledByWindow.set(windowId, { tabId: tab.id, at: now });
 
   await handleTabVisited(tab.id);
 });
@@ -203,7 +207,7 @@ chrome.storage.onChanged.addListener((changes) => {
     }));
     updateBadge();
   }
-  if (changes[STORE_NAMES.WARNING_PREFS] || changes[STORE_NAMES.NOTIFICATION_MODE]) {
+  if (changes[UTILS.STORE_NAMES.WARNING_PREFS] || changes[UTILS.STORE_NAMES.NOTIFICATION_MODE]) {
     updateBadge();
   }
 });
@@ -274,6 +278,44 @@ function recordFilterNotification(filterKeys, sig, now) {
   }
 }
 
+/** Session snapshot written by the popup/options heartbeat while the tool UI is open. */
+const SESSION_TOOL_UI_SNAPSHOT = 'inboxRadarToolUiHostSnapshot';
+/** Heartbeats arrive every 4s; treat as stale after this so SW restarts do not leave stale “open” state. */
+const TOOL_UI_SNAPSHOT_MAX_AGE_MS = 15000;
+async function refreshExtensionToolUiSession(hosts) {
+  const session = chrome.storage?.session;
+  if (!session?.set) return;
+  await session.set({
+    [SESSION_TOOL_UI_SNAPSHOT]: { hosts, at: Date.now() },
+  });
+}
+
+async function clearExtensionToolUiSession() {
+  const session = chrome.storage?.session;
+  if (!session?.remove) return;
+  await session.remove(SESSION_TOOL_UI_SNAPSHOT);
+}
+
+/**
+ * True while popup/options is open and recently reported this host as an active-tab hostname
+ * in some normal browser window (user is using the tool over that page).
+ * @param {string} host
+ */
+async function isExtensionToolUiShowingHost(host) {
+  try {
+    const session = chrome.storage?.session;
+    if (!session?.get) return false;
+    const data = await session.get(SESSION_TOOL_UI_SNAPSHOT);
+    const snap = data[SESSION_TOOL_UI_SNAPSHOT];
+    if (!snap || typeof snap.at !== 'number') return false;
+    if (Date.now() - snap.at > TOOL_UI_SNAPSHOT_MAX_AGE_MS) return false;
+    const list = Array.isArray(snap.hosts) ? snap.hosts : [];
+    return list.includes(host);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * True if some window is focused and its active tab is already on this host (user is “in” this site).
  * Avoids chimes when another background tab on the same host updates.
@@ -282,7 +324,7 @@ function recordFilterNotification(filterKeys, sig, now) {
 async function isUserViewingHostnameInFocusedWindow(host) {
   const activeTabs = await chrome.tabs.query({ active: true });
   for (const t of activeTabs) {
-    if (safeHostnameFromTabUrl(t.url) !== host) continue;
+    if (UTILS.safeHostnameFromTabUrl(t.url) !== host) continue;
     try {
       const w = await chrome.windows.get(t.windowId);
       if (w.focused) return true;
@@ -291,6 +333,16 @@ async function isUserViewingHostnameInFocusedWindow(host) {
     }
   }
   return false;
+}
+
+/**
+ * User is effectively “on” this host: browser focus on that tab, or extension tool open while that
+ * host is active in a normal window (popup steals OS focus from the tab).
+ * @param {string} host
+ */
+async function isUserEffectivelyViewingHost(host) {
+  if (await isExtensionToolUiShowingHost(host)) return true;
+  return isUserViewingHostnameInFocusedWindow(host);
 }
 
 async function countUnmonitoredFilters() {
@@ -307,6 +359,7 @@ async function countUnmonitoredFilters() {
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!changeInfo.title && !tab.url && !changeInfo.favIconUrl) return;
 
+  const hadPriorTitle = Object.prototype.hasOwnProperty.call(lastTitles, tabId);
   const newTitle = changeInfo.title || tab.title;
   const newFavicon = changeInfo.favIconUrl || tab.favIconUrl;
   lastTitles[tabId] = newTitle;
@@ -321,28 +374,83 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       return;
     }
 
-    // Aba já visível e janela focada: não é notificação em segundo plano (getLastFocused falha com várias janelas).
+    // Foreground matched tab: window focused, extension UI shows this host, or stable-host title-only
+    // churn on the selected tab (Chrome often reports the window as unfocused while the user still
+    // reads Gmail, which used to re-fire the OS digest on every title tick).
     // Still refresh badge/icon state because opening/loading this tab may satisfy a regex coverage gap.
-    if (tabInfo.active && tabWindow.focused) {
-      await updateBadge();
+    // Pass digestQuiet when there are already-unread hosts so that rapid title churn does not keep
+    // recreating the OS "Unread by site" toast.
+    //
+    // When the extension popup/options has focus, Chrome often marks the browser window as
+    // unfocused even though the user is still on a matched tab — treat an open tool + active tab on
+    // this host the same as a focused window.
+    const matchesForFocus = tabMatchesRegexRules(tabInfo, newTitle);
+    const hostForFocus = matchesForFocus ? UTILS.safeHostnameFromTabUrl(tabInfo.url) : null;
+    const toolMimicsBrowserFocus =
+      Boolean(hostForFocus) &&
+      tabInfo.active &&
+      (await isExtensionToolUiShowingHost(hostForFocus));
+
+    // Title-only updates on the *selected* tab of a matched site: Chrome often leaves
+    // `windows.get(...).focused` false (extension UI, OS focus quirks) even though the user is
+    // still reading that tab. Treat that like the focused-tab path so Gmail-style unread counters
+    // in the tab title do not re-append `notifiedByHost` and re-fire the OS digest forever.
+    const looksLikeTitleChurn =
+      tabInfo.status === 'complete' &&
+      hadPriorTitle &&
+      Boolean(changeInfo.title) &&
+      changeInfo.url === undefined &&
+      changeInfo.favIconUrl === undefined &&
+      Boolean(hostForFocus) &&
+      lastMatchedHostByTab[tabId] === hostForFocus;
+
+    if (
+      tabInfo.active &&
+      matchesForFocus &&
+      (tabWindow.focused || toolMimicsBrowserFocus || looksLikeTitleChurn)
+    ) {
+      const currentUnread = await getNotifiedByHost();
+      // Never re-sync the OS digest on focused-tab churn while unread exists — that caused
+      // “Unread by site” to repeat (clear+create / live-title signature drift). Toolbar + popup
+      // already show live titles.
+      await updateBadge(currentUnread, {
+        digestQuiet: Object.keys(currentUnread).length > 0,
+      });
+      if (hostForFocus) {
+        lastMatchedHostByTab[tabId] = hostForFocus;
+      }
       return;
     }
 
-    if (!tabMatchesRegexRules(tabInfo, newTitle)) return;
+    if (!tabMatchesRegexRules(tabInfo, newTitle)) {
+      delete lastMatchedHostByTab[tabId];
+      return;
+    }
 
-    const host = safeHostnameFromTabUrl(tabInfo.url);
+    const host = UTILS.safeHostnameFromTabUrl(tabInfo.url);
     if (!host) return;
 
     const notifiedByHost = await getNotifiedByHost();
     /** `first` chime mode: beep only on transition from no unread sites → at least one (not once per host). */
     const wasGloballyClear = Object.keys(notifiedByHost).length === 0;
     const prevEntry = notifiedByHost[host];
+
+    /**
+     * Derive "already pending" from the persisted tabIds instead of an in-memory Set.
+     * This survives service-worker restarts: if the tab ID is already in storage it means
+     * it fired a full alert once and the user has not cleared it yet.
+     */
+    const alreadyPending = prevEntry?.tabIds?.includes(tabId) === true;
+
     const tabIds = new Set(prevEntry?.tabIds || []);
     tabIds.add(tabId);
 
     notifiedByHost[host] = {
       since: prevEntry ? prevEntry.since : Date.now(),
       tabIds: Array.from(tabIds),
+      // Freeze the sample title at first-notification time so that rapid title churn does not
+      // change the digest signature and cause the OS toast to reappear repeatedly.
+      sampleTitle: prevEntry?.sampleTitle ?? newTitle,
     };
 
     const filterKeys = collectMatchingFilterKeys(tabInfo, newTitle);
@@ -350,29 +458,32 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     const now = Date.now();
     const suppressUserAlert = isDuplicateMultiTabNotification(filterKeys, sig, now);
 
-    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
+    await chrome.storage.local.set({ [UTILS.STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
 
     if (!suppressUserAlert) {
       recordFilterNotification(filterKeys, sig, now);
     }
 
-    const userViewingHost = suppressUserAlert
-      ? false
-      : await isUserViewingHostnameInFocusedWindow(host);
-    const suppressAttention = suppressUserAlert || userViewingHost;
+    lastMatchedHostByTab[tabId] = host;
+
+    const userViewingHost = suppressUserAlert ? false : await isUserEffectivelyViewingHost(host);
+    const suppressAttention = suppressUserAlert || userViewingHost || alreadyPending;
+    /**
+     * Same tab still unread: refresh badge/title but skip digest OS toast to avoid
+     * repeated toasts on every title churn while the user has not yet cleared the notification.
+     */
+    const digestQuiet = alreadyPending;
 
     if (!suppressAttention) {
-      await updateBadge(notifiedByHost, { pulse: true });
-      const prefs = await getWarningPrefs();
-      if (prefs.desktopSound) {
-        const chimeEvery = prefs.chimeNotifyMode !== 'first';
-        if (chimeEvery || wasGloballyClear) {
-          await maybePlayExtensionChime();
-        }
-      }
+      // New unread event — apply every enabled channel (badge, digest, chime) in one call.
+      await updateBadge(notifiedByHost, {
+        pulse: true,
+        digestQuiet: false,
+        chime: { wasGloballyClear },
+      });
     } else {
-      // Still sync digest + toolbar title with `notifiedByHost`; only chime and badge pulse are suppressed.
-      await updateBadge(notifiedByHost, { pulse: false });
+      // Already-pending or suppressed: sync badge + toolbar title only; no chime replay.
+      await updateBadge(notifiedByHost, { pulse: false, digestQuiet });
     }
   } catch (error) {
     console.warn(`Error processing tab update ${tabId}:`, error);
@@ -382,6 +493,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   delete lastTitles[tabId];
   delete lastFavicons[tabId];
+  delete lastMatchedHostByTab[tabId];
   await handleTabClosed(tabId);
 });
 
@@ -429,7 +541,7 @@ async function refreshUnreadActionTitle(notifiedByHost, unmonitoredFiltersCount 
       .map((id) => tabById.get(id))
       .filter(Boolean);
     const t = tabsForHost[0];
-    const wait = getTimeAsHuman(now - entry.since);
+    const wait = UTILS.getTimeAsHuman(now - entry.since);
     const raw = t?.title || '';
     const shortTitle = raw.length > 36 ? `${raw.slice(0, 36)}…` : raw;
     segments.push(`${host} — ${shortTitle || '·'} (${wait})`);
@@ -467,8 +579,8 @@ async function playExtensionChime() {
   }
 
   const prefs = await getWarningPrefs();
-  const soundId = CHIME_SOUND_IDS.includes(prefs.chimeSoundId) ? prefs.chimeSoundId : 'soft';
-  const rel = CHIME_SOUND_FILES[soundId] || CHIME_SOUND_FILES.soft;
+  const soundId = UTILS.CHIME_SOUND_IDS.includes(prefs.chimeSoundId) ? prefs.chimeSoundId : 'soft';
+  const rel = UTILS.CHIME_SOUND_FILES[soundId] || UTILS.CHIME_SOUND_FILES.soft;
   const url = chrome.runtime.getURL(rel);
   const durationMs = Math.min(1500, Math.max(200, prefs.chimeDurationMs ?? 500));
   const volume = Math.min(1, Math.max(0.05, prefs.chimeVolume ?? 0.85));
@@ -534,9 +646,11 @@ async function buildDigestListOptions(notifiedByHost) {
     const tabsForHost = (entry.tabIds || [])
       .map((id) => tabById.get(id))
       .filter(Boolean);
-    const sample = tabsForHost[0];
     const n = tabsForHost.length;
-    const titleBit = sample?.title ? sample.title : 'Activity';
+    const liveTitle = tabsForHost[0]?.title || '';
+    // Always prefer frozen sample for the OS digest so the fingerprint stays stable on title churn.
+    // Live titles remain in the toolbar tooltip and popup UI.
+    const titleBit = entry.sampleTitle || liveTitle || 'Activity';
     const line = n > 1 ? `${host} (${n} tabs) — ${titleBit}` : `${host} — ${titleBit}`;
     items.push(line);
   }
@@ -657,7 +771,7 @@ function digestNotificationSignature(listBase, persistent) {
  */
 async function syncUnreadDigestNotificationFromState(notifiedByHost, mode, prefs) {
   const hosts = Object.keys(notifiedByHost);
-  if (hosts.length === 0 || !modeIncludesDigest(mode)) {
+  if (hosts.length === 0 || !UTILS.notificationModeIncludesDigest(mode)) {
     lastDigestNotificationSignature = '';
     await clearDigestNotification();
     return;
@@ -678,6 +792,24 @@ async function syncUnreadDigestNotificationFromState(notifiedByHost, mode, prefs
     silent: true,
     ...(persistent ? { requireInteraction: true } : {}),
   };
+
+  // Prefer update in-place so Windows/Chrome do not treat every refresh as a new toast.
+  if (typeof chrome.notifications?.update === 'function') {
+    const updated = await new Promise((resolve) => {
+      try {
+        chrome.notifications.update(DIGEST_NOTIFICATION_ID, options, (wasUpdated) => {
+          resolve(wasUpdated === true && !chrome.runtime.lastError);
+        });
+      } catch {
+        resolve(false);
+      }
+    });
+    if (updated) {
+      lastDigestNotificationSignature = sig;
+      return;
+    }
+  }
+
   const r = await notificationsCreateTracked(DIGEST_NOTIFICATION_ID, options, true);
   if (r.ok) {
     lastDigestNotificationSignature = sig;
@@ -873,23 +1005,23 @@ function clearLegacyPerHostNotifications(notifiedByHost) {
 }
 
 async function setDefaultColorSchema() {
-  const stored = await chrome.storage.local.get(STORE_NAMES.BADGE_COLOR_SCHEME);
+  const stored = await chrome.storage.local.get(UTILS.STORE_NAMES.BADGE_COLOR_SCHEME);
 
-  if (stored[STORE_NAMES.BADGE_COLOR_SCHEME] === undefined) {
-    await chrome.storage.local.set({ [STORE_NAMES.BADGE_COLOR_SCHEME]: DEFAULT_BADGE_COLORS });
+  if (stored[UTILS.STORE_NAMES.BADGE_COLOR_SCHEME] === undefined) {
+    await chrome.storage.local.set({ [UTILS.STORE_NAMES.BADGE_COLOR_SCHEME]: DEFAULT_BADGE_COLORS });
   }
 }
 
 async function initRegexFilters() {
-  const loadExistingRules = await chrome.storage.local.get(STORE_NAMES.REGEX_FILTERS);
-  let regexFilters = loadExistingRules[STORE_NAMES.REGEX_FILTERS] || [];
+  const loadExistingRules = await chrome.storage.local.get(UTILS.STORE_NAMES.REGEX_FILTERS);
+  let regexFilters = loadExistingRules[UTILS.STORE_NAMES.REGEX_FILTERS] || [];
 
   DEFAULT_SUGGESTIONS.forEach((s) => {
     const exists = regexFilters.some((r) => r.pattern === s.pattern && r.type === s.type);
     if (!exists) regexFilters.push(s);
   });
 
-  await chrome.storage.local.set({ [STORE_NAMES.REGEX_FILTERS]: regexFilters });
+  await chrome.storage.local.set({ [UTILS.STORE_NAMES.REGEX_FILTERS]: regexFilters });
   return await getRegexRules();
 }
 
@@ -902,8 +1034,8 @@ async function setUpdateTimeInterval() {
 }
 
 async function getRegexRules() {
-  const stored = await chrome.storage.local.get(STORE_NAMES.REGEX_FILTERS);
-  return (stored[STORE_NAMES.REGEX_FILTERS] || []).map((r) => ({
+  const stored = await chrome.storage.local.get(UTILS.STORE_NAMES.REGEX_FILTERS);
+  return (stored[UTILS.STORE_NAMES.REGEX_FILTERS] || []).map((r) => ({
     pattern: new RegExp(r.pattern, 'i'),
     type: r.type,
   }));
@@ -911,21 +1043,21 @@ async function getRegexRules() {
 
 /** @returns {Promise<Record<string, { since: number, tabIds: number[] }>>} */
 async function getNotifiedByHost() {
-  const stored = await chrome.storage.local.get(STORE_NAMES.NOTIFIED_BY_HOST);
-  return stored[STORE_NAMES.NOTIFIED_BY_HOST] || {};
+  const stored = await chrome.storage.local.get(UTILS.STORE_NAMES.NOTIFIED_BY_HOST);
+  return stored[UTILS.STORE_NAMES.NOTIFIED_BY_HOST] || {};
 }
 
 async function migrateLegacyNotifiedTabsIfNeeded() {
   const data = await chrome.storage.local.get([
-    STORE_NAMES.NOTIFIED_BY_HOST,
-    STORE_NAMES.NOTIFIED_TABS,
+    UTILS.STORE_NAMES.NOTIFIED_BY_HOST,
+    UTILS.STORE_NAMES.NOTIFIED_TABS,
   ]);
-  const legacy = data[STORE_NAMES.NOTIFIED_TABS];
+  const legacy = data[UTILS.STORE_NAMES.NOTIFIED_TABS];
   if (!legacy || typeof legacy !== 'object' || Object.keys(legacy).length === 0) return;
 
-  const existing = data[STORE_NAMES.NOTIFIED_BY_HOST];
+  const existing = data[UTILS.STORE_NAMES.NOTIFIED_BY_HOST];
   if (existing && typeof existing === 'object' && Object.keys(existing).length > 0) {
-    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_TABS]: {} });
+    await chrome.storage.local.set({ [UTILS.STORE_NAMES.NOTIFIED_TABS]: {} });
     return;
   }
 
@@ -936,7 +1068,7 @@ async function migrateLegacyNotifiedTabsIfNeeded() {
   for (const [tabIdStr, since] of Object.entries(legacy)) {
     const tabId = parseInt(tabIdStr, 10);
     const tab = tabById.get(tabId);
-    const host = safeHostnameFromTabUrl(tab?.url);
+    const host = UTILS.safeHostnameFromTabUrl(tab?.url);
     if (!host) continue;
     if (!notifiedByHost[host]) {
       notifiedByHost[host] = { since: typeof since === 'number' ? since : Date.now(), tabIds: [] };
@@ -951,8 +1083,8 @@ async function migrateLegacyNotifiedTabsIfNeeded() {
   }
 
   await chrome.storage.local.set({
-    [STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost,
-    [STORE_NAMES.NOTIFIED_TABS]: {},
+    [UTILS.STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost,
+    [UTILS.STORE_NAMES.NOTIFIED_TABS]: {},
   });
 }
 
@@ -964,7 +1096,7 @@ async function handleTabVisited(tabId) {
   let host = null;
   try {
     const tab = await chrome.tabs.get(tabId);
-    host = safeHostnameFromTabUrl(tab.url);
+    host = UTILS.safeHostnameFromTabUrl(tab.url);
   } catch {
     // ignore
   }
@@ -981,13 +1113,14 @@ async function handleTabVisited(tabId) {
   delete notifiedByHost[host];
   const tabById = await tabsByIdMap();
   for (const t of tabById.values()) {
-    if (safeHostnameFromTabUrl(t.url) === host) {
+    if (UTILS.safeHostnameFromTabUrl(t.url) === host) {
       delete lastTitles[t.id];
       delete lastFavicons[t.id];
+      delete lastMatchedHostByTab[t.id];
     }
   }
 
-  await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
+  await chrome.storage.local.set({ [UTILS.STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
   await updateBadge(notifiedByHost);
 }
 
@@ -1012,7 +1145,7 @@ async function handleTabClosed(tabId) {
   }
 
   if (changed) {
-    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
+    await chrome.storage.local.set({ [UTILS.STORE_NAMES.NOTIFIED_BY_HOST]: notifiedByHost });
   }
   // Closing a tab can also create a "no matching tab" filter state,
   // even when unread host map did not change.
@@ -1020,23 +1153,45 @@ async function handleTabClosed(tabId) {
 }
 
 /**
+ * The single entry-point for applying ALL enabled notification channels.
+ *
+ * Every path that needs to reflect new unread state — or fire alerts on new activity — must
+ * go through here.  Settings are read once in parallel so every channel sees the same snapshot.
+ *
  * @param {Record<string, { since: number, tabIds: number[] }>} [notifiedByHost]
- * @param {{ pulse?: boolean }} [options] pulse: draw attention when tab activity updated unread (not periodic refresh).
+ * @param {object} [options]
+ * @param {boolean} [options.pulse]
+ *   Animate the badge color for newly-arrived unread activity (default false).
+ * @param {boolean} [options.digestQuiet]
+ *   Skip creating / updating the desktop digest OS toast for this call.
+ *   Set when the same tab is already pending-clear to avoid repeated toasts on title churn.
+ * @param {{ wasGloballyClear: boolean } | false} [options.chime]
+ *   Pass `{ wasGloballyClear }` to allow the chime for a new unread event.
+ *   Omit or pass `false` for state-sync calls (periodic refresh, clear, prefs change, etc.)
+ *   that must never play a sound.
  */
 async function updateBadge(notifiedByHost, options = {}) {
   clearBadgePulse();
-  notifiedByHost = notifiedByHost || (await getNotifiedByHost());
-  const prefs = await getWarningPrefs();
-  const mode = await getNotificationMode();
-  const unmonitoredFiltersCount = await countUnmonitoredFilters();
+  notifiedByHost = notifiedByHost ?? (await getNotifiedByHost());
+
+  // Read all settings in parallel — every channel uses the same snapshot.
+  const [prefs, mode, unmonitoredFiltersCount] = await Promise.all([
+    getWarningPrefs(),
+    getNotificationMode(),
+    countUnmonitoredFilters(),
+  ]);
+
   const hasUnmonitoredFilters = unmonitoredFiltersCount > 0;
   syncActionWarningIcon(hasUnmonitoredFilters);
-  const warningBadgeColor = '#C2410C';
 
-  const badgeAllowed = modeIncludesBadge(mode);
-  const hosts = Object.keys(notifiedByHost);
+  const badgeAllowed = UTILS.notificationModeIncludesBadge(mode);
   const wantPulse = options.pulse === true;
+  const digestQuiet = options.digestQuiet === true;
+  const chimeCtx = options.chime || false;
+  const warningBadgeColor = '#C2410C';
+  const hosts = Object.keys(notifiedByHost);
 
+  // ── Badge ──────────────────────────────────────────────────────────────────
   if (hosts.length === 0) {
     if (!badgeAllowed || !hasUnmonitoredFilters) {
       chrome.action.setBadgeText({ text: '' });
@@ -1044,30 +1199,22 @@ async function updateBadge(notifiedByHost, options = {}) {
       chrome.action.setBadgeText({ text: '!' });
       chrome.action.setBadgeBackgroundColor({ color: warningBadgeColor });
     }
-    await refreshUnreadActionTitle(notifiedByHost, unmonitoredFiltersCount);
-    await syncUnreadDigestNotificationFromState(notifiedByHost, mode, prefs);
-    return;
-  }
-
-  if (!badgeAllowed) {
+  } else if (!badgeAllowed) {
     chrome.action.setBadgeText({ text: '' });
   } else {
     const now = Date.now();
-    const times = hosts.map((h) => now - notifiedByHost[h].since);
-    const oldest = Math.max(...times);
+    const oldest = Math.max(...hosts.map((h) => now - notifiedByHost[h].since));
+    const timeAsHuman = UTILS.getTimeAsHuman(oldest);
+    const messageMinutes = UTILS.getTimeInMinutes(oldest);
 
-    const timeAsHuman = getTimeAsHuman(oldest);
-    const messageMinutes = getTimeInMinutes(oldest);
-
-    const stored = await chrome.storage.local.get(STORE_NAMES.BADGE_COLOR_SCHEME);
-    const scheme = stored[STORE_NAMES.BADGE_COLOR_SCHEME] || DEFAULT_BADGE_COLORS;
+    const stored = await chrome.storage.local.get(UTILS.STORE_NAMES.BADGE_COLOR_SCHEME);
+    const scheme = stored[UTILS.STORE_NAMES.BADGE_COLOR_SCHEME] || DEFAULT_BADGE_COLORS;
     const selectedColor =
       [...scheme].reverse().find((s) => s.threshold <= messageMinutes)?.color || 'red';
 
-    let badgeText = timeAsHuman;
-    if (hasUnmonitoredFilters) {
-      badgeText = timeAsHuman.length <= 3 ? `${timeAsHuman}!` : '!';
-    }
+    const badgeText = hasUnmonitoredFilters
+      ? timeAsHuman.length <= 3 ? `${timeAsHuman}!` : '!'
+      : timeAsHuman;
     chrome.action.setBadgeText({ text: badgeText });
     chrome.action.setBadgeBackgroundColor({ color: selectedColor });
     if (wantPulse) {
@@ -1075,21 +1222,36 @@ async function updateBadge(notifiedByHost, options = {}) {
     }
   }
 
+  // ── Toolbar title ──────────────────────────────────────────────────────────
   await refreshUnreadActionTitle(notifiedByHost, unmonitoredFiltersCount);
-  await syncUnreadDigestNotificationFromState(notifiedByHost, mode, prefs);
+
+  // ── Desktop digest ─────────────────────────────────────────────────────────
+  if (!digestQuiet) {
+    await syncUnreadDigestNotificationFromState(notifiedByHost, mode, prefs);
+  }
+
+  // ── Chime ──────────────────────────────────────────────────────────────────
+  // Only fires when the caller explicitly opts in via options.chime (new unread events only).
+  // State-sync calls (prefs change, periodic refresh, tab close, clear) never pass options.chime.
+  if (chimeCtx && prefs.desktopSound) {
+    const chimeEvery = prefs.chimeNotifyMode !== 'first';
+    if (chimeEvery || chimeCtx.wasGloballyClear) {
+      await maybePlayExtensionChime();
+    }
+  }
 }
 
 async function getNotificationMode() {
-  const stored = await chrome.storage.local.get(STORE_NAMES.NOTIFICATION_MODE);
-  const m = stored[STORE_NAMES.NOTIFICATION_MODE];
+  const stored = await chrome.storage.local.get(UTILS.STORE_NAMES.NOTIFICATION_MODE);
+  const m = stored[UTILS.STORE_NAMES.NOTIFICATION_MODE];
   if (m === 'badge' || m === 'popup' || m === 'both' || m === 'none') return m;
   return 'badge';
 }
 
 async function getWarningPrefs() {
-  const stored = await chrome.storage.local.get(STORE_NAMES.WARNING_PREFS);
-  const raw = stored[STORE_NAMES.WARNING_PREFS] || {};
-  const soundId = CHIME_SOUND_IDS.includes(raw.chimeSoundId) ? raw.chimeSoundId : 'soft';
+  const stored = await chrome.storage.local.get(UTILS.STORE_NAMES.WARNING_PREFS);
+  const raw = stored[UTILS.STORE_NAMES.WARNING_PREFS] || {};
+  const soundId = UTILS.CHIME_SOUND_IDS.includes(raw.chimeSoundId) ? raw.chimeSoundId : 'soft';
   const dur = parseInt(raw.chimeDurationMs, 10);
   const chimeDurationMs =
     Number.isFinite(dur) && dur >= 200 && dur <= 1500 ? dur : 500;
@@ -1113,9 +1275,9 @@ async function getWarningPrefs() {
 }
 
 async function ensureWarningPrefsDefault() {
-  const stored = await chrome.storage.local.get(STORE_NAMES.WARNING_PREFS);
-  if (stored[STORE_NAMES.WARNING_PREFS] !== undefined) return;
-  await chrome.storage.local.set({ [STORE_NAMES.WARNING_PREFS]: { ...DEFAULT_WARNING_PREFS } });
+  const stored = await chrome.storage.local.get(UTILS.STORE_NAMES.WARNING_PREFS);
+  if (stored[UTILS.STORE_NAMES.WARNING_PREFS] !== undefined) return;
+  await chrome.storage.local.set({ [UTILS.STORE_NAMES.WARNING_PREFS]: { ...UTILS.DEFAULT_WARNING_PREFS } });
 }
 
 async function bootExtension() {
@@ -1151,7 +1313,7 @@ async function validateNotifiedHosts() {
   }
 
   if (hasChanges) {
-    await chrome.storage.local.set({ [STORE_NAMES.NOTIFIED_BY_HOST]: cleaned });
+    await chrome.storage.local.set({ [UTILS.STORE_NAMES.NOTIFIED_BY_HOST]: cleaned });
     await updateBadge(cleaned);
   }
 }
